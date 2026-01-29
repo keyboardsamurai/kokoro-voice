@@ -153,12 +153,52 @@ public actor KokoroEngine {
         #endif
     }
 
-    /// Load voice embeddings from the voices.npz archive or individual files
+    /// Load voice embeddings from safetensors files, voices.npz archive, or individual .npy files
+    /// Supports multiple formats in order of preference:
+    /// 1. Individual .safetensors files in voices/ directory (mlx-community format)
+    /// 2. voices.npz archive (Kokoro format)
+    /// 3. Individual .npy files in voices/ directory (fallback)
     private func loadVoiceEmbeddings(from modelPath: URL) async throws {
         let fileManager = FileManager.default
+        let voicesPath = modelPath.appendingPathComponent("voices")
+
+        #if canImport(MLX)
+        // Try loading from voices/*.safetensors first (mlx-community format)
+        if fileManager.fileExists(atPath: voicesPath.path) {
+            do {
+                let voiceFiles = try fileManager.contentsOfDirectory(at: voicesPath, includingPropertiesForKeys: nil)
+                let safetensorsFiles = voiceFiles.filter { $0.pathExtension == "safetensors" }
+
+                if !safetensorsFiles.isEmpty {
+                    for voiceFile in safetensorsFiles {
+                        do {
+                            // loadArrays returns [String: MLXArray] for the tensors in the file
+                            let tensors = try loadArrays(url: voiceFile)
+
+                            // Voice safetensors typically contain one tensor, take the first one
+                            if let embedding = tensors.values.first {
+                                let voiceId = voiceFile.deletingPathExtension().lastPathComponent
+                                voiceEmbeddings[voiceId] = embedding
+                                print("KokoroEngine: Loaded voice embedding for \(voiceId) from safetensors")
+                            }
+                        } catch {
+                            print("KokoroEngine: Failed to load \(voiceFile.lastPathComponent): \(error)")
+                        }
+                    }
+
+                    if !voiceEmbeddings.isEmpty {
+                        print("KokoroEngine: Loaded \(voiceEmbeddings.count) voice embeddings from safetensors files")
+                        return
+                    }
+                }
+            } catch {
+                print("KokoroEngine: Error scanning voices directory: \(error)")
+            }
+        }
+        #endif
 
         #if canImport(MLXUtilsLibrary) && canImport(MLX)
-        // Try loading from voices.npz archive first (preferred)
+        // Try loading from voices.npz archive (Kokoro format)
         let voicesNpzPath = modelPath.appendingPathComponent("voices.npz")
         if fileManager.fileExists(atPath: voicesNpzPath.path) {
             if let allVoices = NpyzReader.read(fileFromPath: voicesNpzPath) {
@@ -168,7 +208,7 @@ public actor KokoroEngine {
                         ? String(key.dropLast(4))  // Remove .npy extension
                         : key
                     voiceEmbeddings[voiceId] = embedding
-                    print("KokoroEngine: Loaded voice embedding for \(voiceId)")
+                    print("KokoroEngine: Loaded voice embedding for \(voiceId) from npz")
                 }
                 print("KokoroEngine: Loaded \(voiceEmbeddings.count) voice embeddings from voices.npz")
                 return
@@ -176,7 +216,6 @@ public actor KokoroEngine {
         }
 
         // Fallback: Try loading individual .npy files from voices directory
-        let voicesPath = modelPath.appendingPathComponent("voices")
         if fileManager.fileExists(atPath: voicesPath.path) {
             do {
                 let voiceFiles = try fileManager.contentsOfDirectory(at: voicesPath, includingPropertiesForKeys: nil)
@@ -186,20 +225,20 @@ public actor KokoroEngine {
                     if let embedding = NpyzReader.read(fileFromPath: voiceFile)?["npy"] {
                         let voiceId = voiceFile.deletingPathExtension().lastPathComponent
                         voiceEmbeddings[voiceId] = embedding
-                        print("KokoroEngine: Loaded voice embedding for \(voiceId)")
+                        print("KokoroEngine: Loaded voice embedding for \(voiceId) from npy")
                     }
                 }
-                print("KokoroEngine: Loaded \(voiceEmbeddings.count) voice embeddings from individual files")
+                print("KokoroEngine: Loaded \(voiceEmbeddings.count) voice embeddings from individual npy files")
             } catch {
                 print("KokoroEngine: Error loading voice embeddings: \(error)")
             }
         }
         #else
-        // Without MLXUtilsLibrary, mark expected voices as available for testing
+        // Without MLXUtilsLibrary/MLX, mark expected voices as available for testing
         for voice in Constants.availableVoices {
             voiceEmbeddings[voice.id] = true as Any
         }
-        print("KokoroEngine: MLXUtilsLibrary not available, using stub voice embeddings")
+        print("KokoroEngine: MLX/MLXUtilsLibrary not available, using stub voice embeddings")
         #endif
     }
 
