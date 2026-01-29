@@ -1,0 +1,151 @@
+name: KokoroVoice
+options:
+  bundleIdPrefix: com.kokorovoice
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: ""  # Add your team ID here
+
+packages:
+  KokoroSwift:
+    url: https://github.com/mlalma/kokoro-ios.git
+    from: "1.0.8"
+  MLXUtilsLibrary:
+    url: https://github.com/mlalma/MLXUtilsLibrary.git
+    branch: main
+
+targets:
+  # Shared Framework
+  KokoroVoiceShared:
+    type: framework
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Shared
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.shared
+        PRODUCT_NAME: KokoroVoiceShared
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: KokoroSwift
+      - package: MLXUtilsLibrary
+
+  # Host Application
+  KokoroVoice:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: KokoroVoice
+        type: group
+        excludes:
+          - "*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.app
+        PRODUCT_NAME: KokoroVoice
+        INFOPLIST_FILE: KokoroVoice/Info.plist
+        CODE_SIGN_ENTITLEMENTS: KokoroVoice/KokoroVoice.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
+    dependencies:
+      - target: KokoroVoiceShared
+        embed: true
+      - target: KokoroVoiceExtension
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+      - package: KokoroSwift
+    entitlements:
+      path: KokoroVoice/KokoroVoice.entitlements
+
+  # Audio Unit Extension
+  KokoroVoiceExtension:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: KokoroVoiceExtension
+        type: group
+        excludes:
+          - "*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.app.extension
+        PRODUCT_NAME: KokoroVoiceExtension
+        INFOPLIST_FILE: KokoroVoiceExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: KokoroVoiceExtension/KokoroVoiceExtension.entitlements
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+          - "@executable_path/../../../../Frameworks"
+        SKIP_INSTALL: YES
+    dependencies:
+      - target: KokoroVoiceShared
+        embed: false
+      - package: KokoroSwift
+    entitlements:
+      path: KokoroVoiceExtension/KokoroVoiceExtension.entitlements
+
+  # Unit Tests
+  KokoroVoiceTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Tests
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.tests
+        PRODUCT_NAME: KokoroVoiceTests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/KokoroVoice.app/Contents/MacOS/KokoroVoice"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+    dependencies:
+      - target: KokoroVoice
+      - target: KokoroVoiceShared
+      - target: KokoroVoiceExtension
+
+schemes:
+  KokoroVoice:
+    build:
+      targets:
+        KokoroVoice: all
+        KokoroVoiceExtension: all
+        KokoroVoiceShared: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - KokoroVoiceTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  KokoroVoiceTests:
+    build:
+      targets:
+        KokoroVoiceTests: [test]
+    test:
+      config: Debug
+      targets:
+        - KokoroVoiceTests
