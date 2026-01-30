@@ -4,6 +4,7 @@
 // Main application entry point for the Kokoro Voice host app.
 
 import SwiftUI
+import KokoroVoiceShared
 
 @main
 struct KokoroVoiceApp: App {
@@ -68,15 +69,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadModel() async {
-        // Find model resources
-        if let resourceURL = Bundle.main.resourceURL {
-            do {
-                try await KokoroEngine.shared.loadModel(from: resourceURL)
-                print("KokoroVoice: Model loaded successfully")
-            } catch {
-                print("KokoroVoice: Failed to load model: \(error)")
+        // Try multiple locations for model files
+        let possiblePaths = [
+            // 1. App bundle resources (production)
+            Bundle.main.resourceURL,
+            // 2. Development: project Resources directory
+            Bundle.main.bundleURL
+                .deletingLastPathComponent() // Contents
+                .deletingLastPathComponent() // KokoroVoice.app
+                .deletingLastPathComponent() // Debug
+                .deletingLastPathComponent() // Products
+                .deletingLastPathComponent() // Build
+                .deletingLastPathComponent() // DerivedData/...
+                .appendingPathComponent("SourcePackages")
+                .deletingLastPathComponent()
+                .appendingPathComponent("Resources"),
+            // 3. Fallback: hardcoded development path
+            URL(fileURLWithPath: "/Users/tag/Documents/workspace-playground/kokoro-voice/KokoroVoice/Resources")
+        ].compactMap { $0 }
+
+        for resourceURL in possiblePaths {
+            let modelFile = resourceURL.appendingPathComponent("kokoro-v1_0.safetensors")
+            if FileManager.default.fileExists(atPath: modelFile.path) {
+                do {
+                    try await KokoroEngine.shared.loadModel(from: resourceURL)
+                    print("KokoroVoice: Model loaded successfully from \(resourceURL.path)")
+                    return
+                } catch {
+                    print("KokoroVoice: Failed to load model from \(resourceURL.path): \(error)")
+                }
             }
         }
+
+        print("KokoroVoice: Model not found. Please download model files to Resources/")
+        print("KokoroVoice: Expected: kokoro-v1_0.safetensors and voices/*.safetensors")
     }
 }
 

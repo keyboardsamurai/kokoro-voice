@@ -30,17 +30,15 @@
             <array>
                 <dict>
                     <key>description</key>
-                    <string>Kokoro Neural TTS Voice</string>
-                    <key>factoryFunction</key>
-                    <string>KokoroVoiceExtension.KokoroSynthesisAudioUnitFactory</string>
+                    <string>Kokoro Neural TTS</string>
                     <key>manufacturer</key>
                     <string>KOKO</string>
                     <key>name</key>
-                    <string>Kokoro Voice</string>
+                    <string>Kokoro: KokoroVoice</string>
                     <key>sandboxSafe</key>
                     <true/>
                     <key>subtype</key>
-                    <string>KVSP</string>
+                    <string>kokr</string>
                     <key>tags</key>
                     <array>
                         <string>Speech Synthesizer</string>
@@ -53,9 +51,9 @@
             </array>
         </dict>
         <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.AudioUnit-UI</string>
+        <string>com.apple.AudioUnit</string>
         <key>NSExtensionPrincipalClass</key>
-        <string>KokoroVoiceExtension.KokoroSynthesisAudioUnit</string>
+        <string>KokoroVoiceExtension.KokoroSynthesisAudioUnitFactory</string>
     </dict>
 </dict>
 </plist>

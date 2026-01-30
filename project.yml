@@ -12,12 +12,11 @@ settings:
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.9"
-    DEVELOPMENT_TEAM: ""  # Add your team ID here
+    DEVELOPMENT_TEAM: "4X9S5V8E73"
 
 packages:
   KokoroSwift:
-    url: https://github.com/mlalma/kokoro-ios.git
-    from: "1.0.8"
+    path: LocalPackages/kokoro-ios
   MLXUtilsLibrary:
     url: https://github.com/mlalma/MLXUtilsLibrary.git
     branch: main
@@ -37,6 +36,7 @@ targets:
         PRODUCT_NAME: KokoroVoiceShared
         DEFINES_MODULE: YES
         SKIP_INSTALL: YES
+        INFOPLIST_FILE: Shared/Info.plist
     dependencies:
       - package: KokoroSwift
       - package: MLXUtilsLibrary
@@ -51,6 +51,9 @@ targets:
         type: group
         excludes:
           - "*.entitlements"
+      - path: Resources
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.app
@@ -71,8 +74,12 @@ targets:
         copy:
           destination: plugins
       - package: KokoroSwift
+      - package: MLXUtilsLibrary
     entitlements:
       path: KokoroVoice/KokoroVoice.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [group.com.kokorovoice.shared]
 
   # Audio Unit Extension
   KokoroVoiceExtension:
@@ -99,8 +106,12 @@ targets:
       - target: KokoroVoiceShared
         embed: false
       - package: KokoroSwift
+      - package: MLXUtilsLibrary
     entitlements:
       path: KokoroVoiceExtension/KokoroVoiceExtension.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [group.com.kokorovoice.shared]
 
   # Unit Tests
   KokoroVoiceTests:

@@ -197,7 +197,7 @@ public actor KokoroEngine {
         }
         #endif
 
-        #if canImport(MLXUtilsLibrary) && canImport(MLX)
+        #if canImport(MLX)
         // Try loading from voices.npz archive (Kokoro format)
         let voicesNpzPath = modelPath.appendingPathComponent("voices.npz")
         if fileManager.fileExists(atPath: voicesNpzPath.path) {

@@ -5,6 +5,7 @@
 // Provides UI for enabling/disabling voices and testing them.
 
 import SwiftUI
+import KokoroVoiceShared
 
 // MARK: - Content View
 

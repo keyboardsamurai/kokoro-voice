@@ -3,17 +3,23 @@
 //
 // ObservableObject that manages voice state for the host app UI.
 // Handles voice enable/disable, testing, and synchronization with system.
+//
+// Dependencies:
+// - VoiceConfiguration.swift (defines VoiceConfiguration and VoiceConfigurationManager)
+// - Constants.swift (defines shared constants)
+// - KokoroEngine.swift (defines Kokoro TTS engine)
 
 import Foundation
 import SwiftUI
 import AVFoundation
 import Combine
+import KokoroVoiceShared
 
 // MARK: - Voice Manager
 
 /// Manages voice configurations and provides UI state
 @MainActor
-public class VoiceManager: ObservableObject {
+public class VoiceManager: NSObject, ObservableObject {
 
     // MARK: - Published Properties
 
@@ -55,15 +61,20 @@ public class VoiceManager: ObservableObject {
         }
     }
 
+    /// Whether a voice is currently being tested
+    @Published public var isSpeaking = false
+
     // MARK: - Private Properties
 
     private let configManager = VoiceConfigurationManager.shared
     private var speechSynthesizer: AVSpeechSynthesizer?
+    private var audioPlayer: AVAudioPlayer?
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
 
-    public init() {
+    public override init() {
+        super.init()
         loadVoices()
         setupNotifications()
     }
@@ -124,42 +135,116 @@ public class VoiceManager: ObservableObject {
 
     // MARK: - Voice Testing
 
-    /// Test a voice by speaking sample text
+    /// Test a voice by speaking sample text using KokoroEngine directly
     public func testVoice(_ voice: VoiceConfiguration, text: String? = nil) {
-        // Cancel any ongoing speech
         stopSpeaking()
-
-        // Create synthesizer if needed
-        if speechSynthesizer == nil {
-            speechSynthesizer = AVSpeechSynthesizer()
-        }
+        selectedVoiceId = voice.id
+        isSpeaking = true
 
         let sampleText = text ?? "Hello! This is the \(voice.name) voice from Kokoro."
-        let utterance = AVSpeechUtterance(string: sampleText)
 
-        // Try to use the Kokoro voice if available
-        if let systemVoice = AVSpeechSynthesisVoice(identifier: voice.identifier) {
-            utterance.voice = systemVoice
-        } else {
-            // Fall back to a system voice for the same language
-            utterance.voice = AVSpeechSynthesisVoice(language: voice.language)
-            print("VoiceManager: Kokoro voice not available, using system fallback")
+        Task {
+            do {
+                // Ensure model is loaded
+                let modelLoaded = await KokoroEngine.shared.isModelLoaded
+                if !modelLoaded {
+                    let modelPath = Bundle.main.resourceURL ?? Bundle.main.bundleURL
+                    try await KokoroEngine.shared.loadModel(from: modelPath)
+                }
+
+                // Generate audio using Kokoro TTS directly
+                let samples = try await KokoroEngine.shared.generateAudio(
+                    text: sampleText,
+                    voiceId: voice.id,
+                    speed: 1.0
+                )
+
+                guard !samples.isEmpty else {
+                    print("VoiceManager: No audio generated")
+                    await MainActor.run {
+                        isSpeaking = false
+                        selectedVoiceId = nil
+                    }
+                    return
+                }
+
+                // Convert Float array to audio data and play
+                await playAudioSamples(samples)
+            } catch {
+                print("VoiceManager: TTS error: \(error)")
+                await MainActor.run {
+                    isSpeaking = false
+                    selectedVoiceId = nil
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Play audio samples through AVAudioPlayer
+    private func playAudioSamples(_ samples: [Float]) async {
+        let audioData = createWAVData(from: samples, sampleRate: Constants.sampleRate)
+
+        await MainActor.run {
+            do {
+                audioPlayer = try AVAudioPlayer(data: audioData)
+                audioPlayer?.delegate = self
+                audioPlayer?.play()
+            } catch {
+                print("VoiceManager: Playback error: \(error)")
+                isSpeaking = false
+                selectedVoiceId = nil
+            }
+        }
+    }
+
+    /// Create WAV data from Float32 samples
+    private func createWAVData(from samples: [Float], sampleRate: Double) -> Data {
+        var data = Data()
+
+        let numChannels: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let byteRate = UInt32(sampleRate) * UInt32(numChannels) * UInt32(bitsPerSample / 8)
+        let blockAlign = numChannels * (bitsPerSample / 8)
+        let dataSize = UInt32(samples.count * 2) // 16-bit = 2 bytes per sample
+        let fileSize = 36 + dataSize
+
+        // RIFF header
+        data.append(contentsOf: "RIFF".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: fileSize.littleEndian) { Array($0) })
+        data.append(contentsOf: "WAVE".utf8)
+
+        // fmt chunk
+        data.append(contentsOf: "fmt ".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) }) // chunk size
+        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) }) // PCM format
+        data.append(contentsOf: withUnsafeBytes(of: numChannels.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: blockAlign.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: bitsPerSample.littleEndian) { Array($0) })
+
+        // data chunk
+        data.append(contentsOf: "data".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
+
+        // Convert Float32 samples to Int16
+        for sample in samples {
+            let clamped = max(-1.0, min(1.0, sample))
+            let int16Value = Int16(clamped * Float(Int16.max))
+            data.append(contentsOf: withUnsafeBytes(of: int16Value.littleEndian) { Array($0) })
         }
 
-        // Speak
-        speechSynthesizer?.speak(utterance)
-        selectedVoiceId = voice.id
+        return data
     }
 
     /// Stop any ongoing speech
     public func stopSpeaking() {
+        audioPlayer?.stop()
+        audioPlayer = nil
         speechSynthesizer?.stopSpeaking(at: .immediate)
+        isSpeaking = false
         selectedVoiceId = nil
-    }
-
-    /// Check if a voice is currently speaking
-    public var isSpeaking: Bool {
-        return speechSynthesizer?.isSpeaking ?? false
     }
 
     // MARK: - System Voice Check
@@ -246,5 +331,26 @@ extension VoiceManager {
     /// Group voices by gender
     public var voicesByGender: [VoiceConfiguration.Gender: [VoiceConfiguration]] {
         Dictionary(grouping: voices) { $0.gender }
+    }
+}
+
+// MARK: - AVAudioPlayerDelegate
+
+extension VoiceManager: AVAudioPlayerDelegate {
+    nonisolated public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            isSpeaking = false
+            selectedVoiceId = nil
+        }
+    }
+
+    nonisolated public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        Task { @MainActor in
+            isSpeaking = false
+            selectedVoiceId = nil
+            if let error = error {
+                print("VoiceManager: Audio decode error: \(error)")
+            }
+        }
     }
 }
