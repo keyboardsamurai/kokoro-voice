@@ -74,7 +74,7 @@ KokoroVoice/
 │   ├── SSMLParserTests/
 │   ├── VoiceConfigurationTests/
 │   └── KokoroEngineTests/
-└── Resources/                     # Model files (downloaded)
+└── Resources/                     # Model files (when downloaded)
     ├── kokoro-v1_0.safetensors
     └── voices/
         ├── af_heart.pt
