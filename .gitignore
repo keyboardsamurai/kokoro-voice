@@ -25,10 +25,12 @@ Carthage/Build/
 
 # Model files (large, download separately)
 Resources/kokoro-v1_0.safetensors
+Resources/config.json
 Resources/voices.npz
 Resources/voices/*.pt
 Resources/voices/*.npz
 Resources/voices/*.npy
+Resources/voices/*.safetensors
 
 # macOS
 .DS_Store
