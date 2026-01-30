@@ -4,24 +4,57 @@ A macOS Speech Synthesis Provider extension that integrates the [Kokoro TTS](htt
 
 ## Features
 
-- 🎙️ **18 High-Quality Neural Voices** - American and British English, male and female
-- 🔊 **System-Level Integration** - Works with VoiceOver, Spoken Content, and all apps
-- ⚡ **On-Device Processing** - No internet required, powered by Apple MLX
-- 🎚️ **SSML Support** - Handles prosody (rate), breaks, and more
-- 🍎 **Native SwiftUI App** - Clean interface for managing voices
+- **18 High-Quality Neural Voices** - American and British English, male and female
+- **System-Level Integration** - Works with VoiceOver, Spoken Content, and all apps
+- **On-Device Processing** - No internet required, powered by Apple MLX
+- **SSML Support** - Handles prosody (rate), breaks, and more
+- **Native SwiftUI App** - Clean interface for managing voices
 
 ## Requirements
 
 - **macOS 15.0+** (Sequoia) - Required for MLX Swift
 - **Apple Silicon** (M1/M2/M3/M4) - Required for MLX framework
-- **Xcode 15.0+**
+- **Xcode 15.0+** (for building from source)
+
+## Installation
+
+**For pre-built binaries**, see [INSTALL.md](INSTALL.md) for easy installation instructions.
+
+**To build from source**, continue reading below.
+
+## Quick Start (Build from Source)
+
+```bash
+# 1. Download model files (~326MB, first time only)
+make download-models
+
+# 2. Build unsigned release
+make release
+
+# 3. Install locally
+make install
+```
+
+Or create a distributable DMG:
+
+```bash
+make dist
+```
 
 ## Project Structure
 
 ```
 KokoroVoice/
-├── project.yml                    # XcodeGen project specification
+├── Makefile                       # Build commands
+├── project.yml                    # XcodeGen project specification (signed)
+├── project-unsigned.yml           # XcodeGen project specification (unsigned)
 ├── Package.swift                  # SPM for testing components
+├── INSTALL.md                     # End-user installation guide
+├── scripts/
+│   ├── build-release.sh           # Build unsigned app
+│   ├── download-models.sh         # Download model files
+│   ├── install.sh                 # Local installation
+│   └── create-dmg.sh              # Create distributable DMG
 ├── KokoroVoice/                   # Host App
 │   ├── KokoroVoiceApp.swift       # Main app entry
 │   ├── ContentView.swift          # Main UI
@@ -41,103 +74,57 @@ KokoroVoice/
 │   ├── SSMLParserTests/
 │   ├── VoiceConfigurationTests/
 │   └── KokoroEngineTests/
-└── Resources/                     # Model files (add manually)
+└── Resources/                     # Model files (downloaded)
     ├── kokoro-v1_0.safetensors
     └── voices/
         ├── af_heart.pt
         └── ...
 ```
 
-## Setup Instructions
+## Developer Setup
 
-### Option 1: Using XcodeGen (Recommended)
+For development with code signing and debugging in Xcode:
 
-1. **Install XcodeGen**:
-   ```bash
-   brew install xcodegen
-   ```
+### Prerequisites
 
-2. **Generate Xcode Project**:
-   ```bash
-   cd KokoroVoice
-   xcodegen generate
-   ```
+```bash
+# Install XcodeGen
+brew install xcodegen
+```
 
-3. **Open in Xcode**:
-   ```bash
-   open KokoroVoice.xcodeproj
-   ```
+### Download Models
 
-4. **Configure Signing**:
-   - Select the project in Xcode
-   - For each target, select your Development Team
-   - Xcode will manage signing automatically
+Model files (~326MB) are not included in the repository. Download them using:
 
-5. **Add Model Files** (see below)
+```bash
+make download-models
+# or directly:
+./scripts/download-models.sh
+```
 
-6. **Build and Run**
+### Generate Xcode Project
 
-### Option 2: Manual Xcode Setup
+For signed development builds:
 
-If you prefer not to use XcodeGen:
+```bash
+xcodegen generate
+open KokoroVoice.xcodeproj
+```
 
-1. **Create New Project**:
-   - File → New → Project → macOS → App
-   - Product Name: `KokoroVoice`
-   - Team: Select your team
-   - Interface: SwiftUI
-   - Language: Swift
+For unsigned builds:
 
-2. **Add Audio Unit Extension Target**:
-   - File → New → Target → Audio Unit Extension
-   - Product Name: `KokoroVoiceExtension`
-   - **Audio Unit Type: Speech Synthesizer** ⚠️ Critical
-   - Subtype: `KVSP`
-   - Manufacturer: `KOKO`
+```bash
+xcodegen generate --spec project-unsigned.yml
+open KokoroVoice.xcodeproj
+```
 
-3. **Configure App Groups**:
-   - Select KokoroVoice target → Signing & Capabilities
-   - Add "App Groups" → Create: `group.com.kokorovoice.shared`
-   - Repeat for KokoroVoiceExtension target
+### Configure Signing (Signed builds only)
 
-4. **Add Swift Package**:
-   - File → Add Package Dependencies
-   - URL: `https://github.com/mlalma/kokoro-ios.git`
-   - Add to BOTH targets
+1. Select the project in Xcode
+2. For each target, select your Development Team
+3. Xcode will manage signing automatically
 
-5. **Copy Source Files**:
-   - Copy all `.swift` files to appropriate targets
-   - Copy Info.plist and entitlements files
-
-6. **Add Model Files** (see below)
-
-### Adding Model Files
-
-The model files are not included due to size (~600MB). Download them:
-
-1. **Download Model**:
-   ```bash
-   # Create Resources directory
-   mkdir -p KokoroVoice/Resources/voices
-
-   # Download model (requires git-lfs)
-   git lfs install
-   git clone https://huggingface.co/prince-canuma/Kokoro-82M temp
-   cp temp/kokoro-v1_0.safetensors KokoroVoice/Resources/
-   rm -rf temp
-
-   # Download voices
-   git clone https://huggingface.co/hexgrad/Kokoro-82M temp2
-   cp temp2/voices/*.pt KokoroVoice/Resources/voices/
-   rm -rf temp2
-   ```
-
-2. **Add to Xcode**:
-   - Drag `Resources` folder into Xcode
-   - Select "Copy items if needed"
-   - Add to both targets
-
-### Apple Developer Setup
+### Apple Developer Setup (Signed builds only)
 
 1. **Register App IDs** (developer.apple.com):
    - `com.kokorovoice.app` (host app)

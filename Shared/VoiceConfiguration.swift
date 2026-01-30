@@ -99,45 +99,68 @@ public struct VoiceConfiguration: Codable, Identifiable, Equatable, Hashable {
 
 // MARK: - Voice Configuration Manager
 
-/// Manages voice configurations persistence via App Groups
+/// Manages voice configurations persistence via App Groups (when available) or standard UserDefaults
 public final class VoiceConfigurationManager: @unchecked Sendable {
 
     // MARK: - Singleton
 
-    /// Shared instance using the app group identifier
+    /// Shared instance using the app group identifier with fallback to standard UserDefaults
     public static let shared = VoiceConfigurationManager(suiteName: Constants.appGroupIdentifier)
 
     // MARK: - Properties
 
-    private let userDefaults: UserDefaults?
+    private let userDefaults: UserDefaults
     private let suiteName: String
+    private let isUsingAppGroup: Bool
 
     // MARK: - Initialization
 
     /// Initialize with a specific UserDefaults suite name
+    /// Falls back to standard UserDefaults if App Group is unavailable (unsigned builds)
     /// - Parameter suiteName: The UserDefaults suite name (usually app group identifier)
-    public init(suiteName: String) {
-        self.suiteName = suiteName
-        self.userDefaults = UserDefaults(suiteName: suiteName)
+    public init(suiteName: String?) {
+        self.suiteName = suiteName ?? "standard"
+
+        // Try App Group first, fall back to standard UserDefaults for unsigned builds
+        if let suiteName = suiteName,
+           let groupDefaults = UserDefaults(suiteName: suiteName) {
+            self.userDefaults = groupDefaults
+            self.isUsingAppGroup = true
+        } else {
+            self.userDefaults = UserDefaults.standard
+            self.isUsingAppGroup = false
+            print("VoiceConfigurationManager: App Group unavailable, using standard UserDefaults (all voices enabled)")
+        }
     }
 
     // MARK: - Public Methods
 
+    /// Whether App Group storage is available (signed builds only)
+    public var hasAppGroupAccess: Bool {
+        isUsingAppGroup
+    }
+
     /// Get all voice configurations
     /// - Returns: Array of all voice configurations, or default configurations if none saved
+    ///           For unsigned builds (no App Group), all voices are always enabled
     public func getAllVoices() -> [VoiceConfiguration] {
-        if let data = userDefaults?.data(forKey: Constants.voicesKey),
+        // For unsigned builds without App Group, always return all voices enabled
+        if !isUsingAppGroup {
+            return createAllVoicesEnabledConfiguration()
+        }
+
+        if let data = userDefaults.data(forKey: Constants.voicesKey),
            let voices = try? JSONDecoder().decode([VoiceConfiguration].self, from: data) {
             return voices
         }
 
-        // No saved configuration - create defaults with all voices enabled
+        // No saved configuration - create defaults with selected voices enabled
         let defaults = createDefaultVoiceConfigurations()
 
         // Save defaults for next time to ensure persistence
         if let data = try? JSONEncoder().encode(defaults) {
-            userDefaults?.set(data, forKey: Constants.voicesKey)
-            userDefaults?.synchronize()
+            userDefaults.set(data, forKey: Constants.voicesKey)
+            userDefaults.synchronize()
         }
 
         return defaults
@@ -159,12 +182,15 @@ public final class VoiceConfigurationManager: @unchecked Sendable {
     /// Save voice configurations
     /// - Parameter voices: Array of voice configurations to save
     public func saveVoiceConfigurations(_ voices: [VoiceConfiguration]) {
+        // Skip saving for unsigned builds - all voices are always enabled
+        guard isUsingAppGroup else { return }
+
         guard let data = try? JSONEncoder().encode(voices) else {
             print("VoiceConfigurationManager: Failed to encode voice configurations")
             return
         }
-        userDefaults?.set(data, forKey: Constants.voicesKey)
-        userDefaults?.synchronize()
+        userDefaults.set(data, forKey: Constants.voicesKey)
+        userDefaults.synchronize()
 
         // Notify system of voice changes
         notifySystemOfVoiceChanges()
@@ -198,11 +224,19 @@ public final class VoiceConfigurationManager: @unchecked Sendable {
 
     /// Clear all saved voice configurations
     public func clearAll() {
-        userDefaults?.removeObject(forKey: Constants.voicesKey)
-        userDefaults?.synchronize()
+        guard isUsingAppGroup else { return }
+        userDefaults.removeObject(forKey: Constants.voicesKey)
+        userDefaults.synchronize()
     }
 
     // MARK: - Private Methods
+
+    /// Create voice configurations with all voices enabled (for unsigned builds)
+    private func createAllVoicesEnabledConfiguration() -> [VoiceConfiguration] {
+        return Constants.availableVoices.map { definition in
+            VoiceConfiguration(from: definition, isEnabled: true)
+        }
+    }
 
     /// Create default voice configurations from available voices
     private func createDefaultVoiceConfigurations() -> [VoiceConfiguration] {

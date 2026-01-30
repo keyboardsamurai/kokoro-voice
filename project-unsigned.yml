@@ -1,0 +1,144 @@
+# project-unsigned.yml
+# XcodeGen configuration for unsigned distribution builds
+# Use: xcodegen generate --spec project-unsigned.yml
+
+name: KokoroVoice
+options:
+  bundleIdPrefix: com.kokorovoice
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    # No DEVELOPMENT_TEAM for unsigned builds
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+
+packages:
+  KokoroSwift:
+    path: LocalPackages/kokoro-ios
+  MLXUtilsLibrary:
+    url: https://github.com/mlalma/MLXUtilsLibrary.git
+    branch: main
+
+targets:
+  # Shared Framework
+  KokoroVoiceShared:
+    type: framework
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Shared
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.shared
+        PRODUCT_NAME: KokoroVoiceShared
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+        INFOPLIST_FILE: Shared/Info.plist
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+    dependencies:
+      - package: KokoroSwift
+      - package: MLXUtilsLibrary
+
+  # Host Application
+  KokoroVoice:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: KokoroVoice
+        type: group
+        excludes:
+          - "*.entitlements"
+      - path: Resources
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.app
+        PRODUCT_NAME: KokoroVoice
+        INFOPLIST_FILE: KokoroVoice/Info.plist
+        CODE_SIGN_ENTITLEMENTS: KokoroVoice/KokoroVoice-unsigned.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+    dependencies:
+      - target: KokoroVoiceShared
+        embed: true
+      - target: KokoroVoiceExtension
+        embed: true
+        codeSign: false
+        copy:
+          destination: plugins
+      - package: KokoroSwift
+      - package: MLXUtilsLibrary
+    entitlements:
+      path: KokoroVoice/KokoroVoice-unsigned.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+
+  # Audio Unit Extension
+  KokoroVoiceExtension:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: KokoroVoiceExtension
+        type: group
+        excludes:
+          - "*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kokorovoice.app.extension
+        PRODUCT_NAME: KokoroVoiceExtension
+        INFOPLIST_FILE: KokoroVoiceExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: KokoroVoiceExtension/KokoroVoiceExtension-unsigned.entitlements
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+          - "@executable_path/../../../../Frameworks"
+        SKIP_INSTALL: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+    dependencies:
+      - target: KokoroVoiceShared
+        embed: false
+      - package: KokoroSwift
+      - package: MLXUtilsLibrary
+    entitlements:
+      path: KokoroVoiceExtension/KokoroVoiceExtension-unsigned.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+
+schemes:
+  KokoroVoice:
+    build:
+      targets:
+        KokoroVoice: all
+        KokoroVoiceExtension: all
+        KokoroVoiceShared: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
