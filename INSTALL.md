@@ -157,7 +157,7 @@ KokoroVoice includes 18 high-quality voices:
 If you prefer to build from source:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/kokorovoice
+git clone https://github.com/keyboardsamurai/kokoro-voice
 cd kokorovoice/KokoroVoice
 make download-models
 make release
@@ -168,8 +168,8 @@ See the README for development setup instructions.
 
 ## Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/YOUR_USERNAME/kokorovoice/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/YOUR_USERNAME/kokorovoice/discussions)
+- **Issues**: [GitHub Issues](https://github.com/keyboardsamurai/kokoro-voice/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/keyboardsamurai/kokoro-voice/discussions)
 
 ## License
 
