@@ -126,11 +126,21 @@ public final class VoiceConfigurationManager: @unchecked Sendable {
     /// Get all voice configurations
     /// - Returns: Array of all voice configurations, or default configurations if none saved
     public func getAllVoices() -> [VoiceConfiguration] {
-        guard let data = userDefaults?.data(forKey: Constants.voicesKey),
-              let voices = try? JSONDecoder().decode([VoiceConfiguration].self, from: data) else {
-            return createDefaultVoiceConfigurations()
+        if let data = userDefaults?.data(forKey: Constants.voicesKey),
+           let voices = try? JSONDecoder().decode([VoiceConfiguration].self, from: data) {
+            return voices
         }
-        return voices
+
+        // No saved configuration - create defaults with all voices enabled
+        let defaults = createDefaultVoiceConfigurations()
+
+        // Save defaults for next time to ensure persistence
+        if let data = try? JSONEncoder().encode(defaults) {
+            userDefaults?.set(data, forKey: Constants.voicesKey)
+            userDefaults?.synchronize()
+        }
+
+        return defaults
     }
 
     /// Get only enabled voice configurations

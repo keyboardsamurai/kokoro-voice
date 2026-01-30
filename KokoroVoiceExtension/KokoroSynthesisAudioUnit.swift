@@ -26,6 +26,9 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     /// Reference to voice configuration manager
     private let configManager = VoiceConfigurationManager.shared
 
+    /// Output busses array for audio routing
+    private var _outputBusses: AUAudioUnitBusArray!
+
     /// Current audio buffer containing synthesized speech
     private var currentBuffer: AVAudioPCMBuffer?
 
@@ -58,12 +61,36 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     public override init(componentDescription: AudioComponentDescription, options: AudioComponentInstantiationOptions = []) throws {
         try super.init(componentDescription: componentDescription, options: options)
 
+        // Set up output bus with correct audio format
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Constants.sampleRate,
+            channels: AVAudioChannelCount(Constants.channelCount),
+            interleaved: false
+        ) else {
+            throw NSError(domain: "KokoroSynthesisAudioUnit", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create output audio format"])
+        }
+
+        do {
+            let outputBus = try AUAudioUnitBus(format: outputFormat)
+            _outputBusses = AUAudioUnitBusArray(audioUnit: self, busType: .output, busses: [outputBus])
+        } catch {
+            throw NSError(domain: "KokoroSynthesisAudioUnit", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to create output bus: \(error)"])
+        }
+
         // Load model asynchronously
         Task {
             await self.loadModel()
         }
 
-        print("KokoroSynthesisAudioUnit: Initialized")
+        print("KokoroSynthesisAudioUnit: Initialized with format \(outputFormat)")
+    }
+
+    // MARK: - Audio Unit Configuration
+
+    /// Override outputBusses to provide our configured output
+    public override var outputBusses: AUAudioUnitBusArray {
+        return _outputBusses
     }
 
     // MARK: - Model Loading
@@ -90,17 +117,42 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
 
     /// Find the URL for model resources
     private func findModelResourceURL() -> URL? {
-        // Try bundle resources first
+        let fileManager = FileManager.default
+
+        // For extensions embedded in app: navigate from extension bundle to containing app's resources
+        // Extension is at: KokoroVoice.app/Contents/PlugIns/KokoroVoiceExtension.appex
+        // Resources are at: KokoroVoice.app/Contents/Resources/Resources/
+        if let extensionBundle = Bundle(for: type(of: self)).bundleURL as URL? {
+            // Go up from .appex to PlugIns, then to Contents, then to Resources
+            let appContentsURL = extensionBundle
+                .deletingLastPathComponent()  // Remove KokoroVoiceExtension.appex
+                .deletingLastPathComponent()  // Remove PlugIns
+            let appResourcesURL = appContentsURL.appendingPathComponent("Resources/Resources")
+
+            print("KokoroSynthesisAudioUnit: Checking app resources at \(appResourcesURL.path)")
+            if fileManager.fileExists(atPath: appResourcesURL.path) {
+                return appResourcesURL
+            }
+
+            // Also try without nested Resources folder
+            let directResourcesURL = appContentsURL.appendingPathComponent("Resources")
+            print("KokoroSynthesisAudioUnit: Checking direct resources at \(directResourcesURL.path)")
+            if fileManager.fileExists(atPath: directResourcesURL.appendingPathComponent("kokoro-v1_0.safetensors").path) {
+                return directResourcesURL
+            }
+        }
+
+        // Try extension's own bundle resources
         if let bundleURL = Bundle.main.resourceURL?.appendingPathComponent("Resources") {
-            if FileManager.default.fileExists(atPath: bundleURL.path) {
+            if fileManager.fileExists(atPath: bundleURL.path) {
                 return bundleURL
             }
         }
 
         // Try app group container
-        if let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Constants.appGroupIdentifier) {
+        if let containerURL = fileManager.containerURL(forSecurityApplicationGroupIdentifier: Constants.appGroupIdentifier) {
             let modelsURL = containerURL.appendingPathComponent("Models")
-            if FileManager.default.fileExists(atPath: modelsURL.path) {
+            if fileManager.fileExists(atPath: modelsURL.path) {
                 return modelsURL
             }
         }
@@ -130,7 +182,12 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         get {
             let enabledVoices = configManager.getEnabledVoices()
 
-            return enabledVoices.map { config in
+            // If no voices enabled, fall back to all available voices to prevent crash
+            let voicesToReturn = enabledVoices.isEmpty
+                ? Constants.availableVoices.map { VoiceConfiguration(from: $0, isEnabled: true) }
+                : enabledVoices
+
+            return voicesToReturn.map { config in
                 AVSpeechSynthesisProviderVoice(
                     name: config.displayName,
                     identifier: config.identifier,
@@ -369,14 +426,20 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
 /// This is referenced in the extension's Info.plist
 @available(macOS 13.0, iOS 16.0, *)
 @objc
-public class KokoroSynthesisAudioUnitFactory: NSObject {
+public class KokoroSynthesisAudioUnitFactory: NSObject, AUAudioUnitFactory {
 
-    /// Create a new audio unit instance
-    /// - Parameter componentDescription: The audio component description
-    /// - Returns: A new KokoroSynthesisAudioUnit instance
+    /// Required by AUAudioUnitFactory protocol
+    /// Creates audio unit instances when requested by the system
     @objc
-    public static func createAudioUnit(componentDescription: AudioComponentDescription) throws -> AUAudioUnit {
+    public func createAudioUnit(with componentDescription: AudioComponentDescription) throws -> AUAudioUnit {
         return try KokoroSynthesisAudioUnit(componentDescription: componentDescription)
+    }
+
+    /// Required by NSExtensionRequestHandling protocol (inherited through AUAudioUnitFactory)
+    @objc
+    public func beginRequest(with context: NSExtensionContext) {
+        // Audio Unit extensions don't use this method directly
+        // The system uses createAudioUnit(with:) instead
     }
 }
 
