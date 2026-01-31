@@ -123,9 +123,9 @@ projects:
     notes: "Spec and plan approved 2025-01-31. Reviewed by Gemini (APPROVE) and Codex (APPROVE with minor notes)."
 
   - id: "0003"
-    title: "Multi-Language Support"
-    summary: "Add 54 voices in 9 languages (Japanese, Chinese, Spanish, French, Hindi, Italian, Portuguese)"
-    status: planned
+    title: "Multi-Language Support (Romance Languages)"
+    summary: "Add 36 voices: 28 English + 8 Romance (Spanish, Italian, Portuguese) with rule-based G2P"
+    status: implementing
     priority: high
     files:
       spec: codev/specs/0003-multi-language-support.md
@@ -133,7 +133,7 @@ projects:
       review: null
     dependencies: []
     tags: [features, i18n, voices]
-    notes: "Spec approved 2025-01-31. Plan reviewed by Codex through 6 iterations - remaining issues are minor."
+    notes: "Scope reduced from 54 to 36 voices to avoid GPL. Uses rule-based G2P instead of eSpeakNG."
 ```
 
 ## Next Available Number

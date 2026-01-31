@@ -1,258 +1,221 @@
-# Plan 0003: Multi-Language Support
+# Plan 0003: Multi-Language Support (Romance Languages)
 
 ## Overview
 
-This plan implements multi-language TTS support for KokoroVoice, adding 36 new voices across 7 non-English languages plus completing the English voice set.
+This plan adds Spanish, Italian, and Portuguese voice support to KokoroVoice using rule-based G2P (no GPL dependencies).
 
 **Spec:** [codev/specs/0003-multi-language-support.md](../specs/0003-multi-language-support.md)
 
-**Key Changes:**
-1. Enable eSpeakNG G2P for non-English languages
-2. Add 36 new voice definitions and embeddings
-3. Update engine for language-aware G2P selection
-4. Register all voices with system
+**Scope:**
+- 8 new voices: Spanish (3), Italian (2), Portuguese (3)
+- 10 new English voices (completing the set)
+- Rule-based G2P for Romance languages
+- **Total: 36 voices** (28 English + 8 Romance)
 
-## Phase 0: GPL-3.0 Decision Gate
+## Phase 1: Rule-Based Romance G2P
 
-**Goal:** Explicit go/no-go decision on eSpeakNG licensing before any code lands
-
-**Background:** eSpeakNG is GPL-3.0 licensed. Linking (static or dynamic) a GPL-3 library into a distributed macOS app imposes GPL obligations on the **entire combined work**.
-
-### Decision Required
-
-Before proceeding with Phase 1, the project owner must explicitly decide:
-
-| Question | Decision | Implications |
-|----------|----------|--------------|
-| Is GPL-3.0 acceptable for this project? | **YES** or **NO** | Determines whether we proceed with eSpeakNG |
-| Distribution channel? | Direct download / Mac App Store / Both | App Store may have additional restrictions |
-| Source availability? | Public repo / Written offer / Both | Required by GPL-3.0 |
-
-**If YES (GPL acceptable):**
-- Proceed with eSpeakNG as planned
-- Ensure source availability (public repo or written offer)
-- Include full GPL-3.0 license text in app bundle
-- Document in README that project is GPL-3.0 due to eSpeakNG dependency
-
-**If NO (GPL not acceptable):**
-- **Alternative 1:** Investigate MFA (Mozilla Festival Agreement) phonemizers
-- **Alternative 2:** Use English-only mode (Misaki) and defer multi-language
-- **Alternative 3:** Build/ship eSpeakNG as separate process (IPC) to isolate GPL scope
-- Create follow-up spec for alternative phonemizer research
-
-### Acceptance Criteria
-- [ ] **BLOCKER:** GPL decision documented in project README or DECISIONS.md
-- [ ] If NO: alternative phonemizer approach identified - Phase 1+ cannot proceed
-- [ ] If YES: Project README updated with GPL-3.0 license notice
-
-**⚠️ GATE: Phase 1+ cannot begin until Phase 0 is complete and documented.**
-
----
-
-## Phase 1: Enable eSpeakNG G2P
-
-**Goal:** Get eSpeakNG dependency building and working
-
-**Prerequisite:** Phase 0 decision = YES (GPL acceptable)
-
-**eSpeakNG data resources:** The `eSpeakNGSwift` package includes `espeak-ng-data` dictionaries. These are bundled with the Swift package and accessed via `Bundle(for: eSpeakNGG2PProcessor.self)`. Verify this works in extension context during spike 1.8.
+**Goal:** Implement pure Swift G2P for Spanish, Italian, and Portuguese
 
 ### Tasks
 
-1.1. **Uncomment eSpeakNG dependency**
+1.1. **Create RomanceG2PProcessor**
 ```swift
-// LocalPackages/kokoro-ios/Package.swift
-.package(url: "https://github.com/mlalma/eSpeakNGSwift", from: "1.0.1"),
+// LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/RomanceG2PProcessor.swift
+final class RomanceG2PProcessor: G2PProcessor {
+    private var currentLanguage: Language?
 
-// In KokoroSwift target dependencies:
-.product(name: "eSpeakNGLib", package: "eSpeakNGSwift"),
+    func setLanguage(_ language: Language) throws {
+        guard [.spanish, .italian, .brazilianPortuguese].contains(language) else {
+            throw G2PProcessorError.unsupportedLanguage(language.rawValue)
+        }
+        currentLanguage = language
+    }
+
+    func process(input: String) throws -> String {
+        guard let language = currentLanguage else {
+            throw G2PProcessorError.processorNotInitialized
+        }
+
+        switch language {
+        case .spanish:
+            return try processSpanish(input)
+        case .italian:
+            return try processItalian(input)
+        case .brazilianPortuguese:
+            return try processPortuguese(input)
+        default:
+            throw G2PProcessorError.unsupportedLanguage(language.rawValue)
+        }
+    }
+}
 ```
 
-1.2. **Add Language enum cases**
+1.2. **Implement Spanish G2P rules**
+
+Spanish has nearly 1:1 grapheme-to-phoneme mapping:
+
+```swift
+private func processSpanish(_ text: String) throws -> String {
+    var phonemes: [String] = []
+    let chars = Array(text.lowercased())
+    var i = 0
+
+    while i < chars.count {
+        let char = chars[i]
+        let next = i + 1 < chars.count ? chars[i + 1] : nil
+
+        switch char {
+        // Vowels
+        case "a": phonemes.append("a"); i += 1
+        case "e": phonemes.append("e"); i += 1
+        case "i": phonemes.append("i"); i += 1
+        case "o": phonemes.append("o"); i += 1
+        case "u": phonemes.append("u"); i += 1
+
+        // Special consonants
+        case "c":
+            if next == "h" {
+                phonemes.append("tʃ"); i += 2  // ch → tʃ
+            } else if next == "e" || next == "i" {
+                phonemes.append("θ"); i += 1   // ce, ci → θ (Spain) or s (Latin America)
+            } else {
+                phonemes.append("k"); i += 1
+            }
+        case "g":
+            if next == "e" || next == "i" {
+                phonemes.append("x"); i += 1   // ge, gi → x
+            } else if next == "u" {
+                phonemes.append("g"); i += 2   // gu → g
+            } else {
+                phonemes.append("g"); i += 1
+            }
+        case "j": phonemes.append("x"); i += 1
+        case "ñ": phonemes.append("ɲ"); i += 1
+        case "ll": phonemes.append("ʎ"); i += 2
+        case "rr": phonemes.append("r"); i += 2  // Trilled r
+        case "r": phonemes.append("ɾ"); i += 1   // Flapped r
+        case "v", "b": phonemes.append("b"); i += 1
+        case "z": phonemes.append("θ"); i += 1
+
+        // Standard consonants
+        case "d": phonemes.append("d"); i += 1
+        case "f": phonemes.append("f"); i += 1
+        case "k": phonemes.append("k"); i += 1
+        case "l": phonemes.append("l"); i += 1
+        case "m": phonemes.append("m"); i += 1
+        case "n": phonemes.append("n"); i += 1
+        case "p": phonemes.append("p"); i += 1
+        case "s": phonemes.append("s"); i += 1
+        case "t": phonemes.append("t"); i += 1
+        case "x": phonemes.append("ks"); i += 1
+        case "y": phonemes.append("ʝ"); i += 1
+
+        // Silent letters
+        case "h": i += 1  // Silent
+
+        // Spaces and punctuation
+        case " ": phonemes.append(" "); i += 1
+        default: i += 1
+        }
+    }
+
+    return phonemes.joined()
+}
+```
+
+1.3. **Implement Italian G2P rules**
+
+Italian is very regular (similar to Spanish):
+
+```swift
+private func processItalian(_ text: String) throws -> String {
+    // Similar structure to Spanish
+    // Key differences:
+    // - c before e/i → tʃ (not θ)
+    // - g before e/i → dʒ
+    // - gli → ʎ
+    // - gn → ɲ
+    // - sc before e/i → ʃ
+}
+```
+
+1.4. **Implement Portuguese G2P rules**
+
+Portuguese is mostly regular with some nasal vowel rules:
+
+```swift
+private func processPortuguese(_ text: String) throws -> String {
+    // Key features:
+    // - Nasal vowels: ã, õ, etc.
+    // - lh → ʎ
+    // - nh → ɲ
+    // - x has multiple pronunciations based on context
+}
+```
+
+1.5. **Create PhonemeNormalizer**
+
+Validate output against Kokoro's vocabulary:
+
+```swift
+// LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/PhonemeNormalizer.swift
+struct PhonemeNormalizer {
+    /// Kokoro's phoneme vocabulary (subset relevant for Romance languages)
+    static let kokoroVocabulary: Set<String> = [
+        "a", "b", "d", "e", "f", "g", "i", "k", "l", "m", "n", "o", "p",
+        "r", "s", "t", "u", "v", "w", "x", "z",
+        "ɾ", "ʎ", "ɲ", "θ", "ʝ", "tʃ", "dʒ", "ʃ", "ks",
+        // ... complete set
+    ]
+
+    static func normalize(_ phonemes: String) throws -> String {
+        // Validate each phoneme against vocabulary
+        // Map common variants
+        // Report unmappable phonemes
+    }
+}
+```
+
+### Tests
+- Spanish "Hola mundo" produces valid phonemes
+- Italian "Ciao mondo" produces valid phonemes
+- Portuguese "Olá mundo" produces valid phonemes
+- All phonemes are in Kokoro vocabulary
+
+### Acceptance Criteria
+- [ ] RomanceG2PProcessor builds without errors
+- [ ] Spanish G2P produces correct IPA for test sentences
+- [ ] Italian G2P produces correct IPA for test sentences
+- [ ] Portuguese G2P produces correct IPA for test sentences
+- [ ] PhonemeNormalizer validates all output
+
+---
+
+## Phase 2: Add Voice Definitions and Embeddings
+
+**Goal:** Add all 18 new voice definitions and download embeddings
+
+### Tasks
+
+2.1. **Update Language enum**
 ```swift
 // LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/Language.swift
-public enum Language: String, CaseIterable {
+public enum Language: String {
     case americanEnglish = "en-US"
     case britishEnglish = "en-GB"
-    case japanese = "ja-JP"
-    case mandarinChinese = "zh-CN"
     case spanish = "es-ES"
-    case french = "fr-FR"
-    case hindi = "hi-IN"
     case italian = "it-IT"
     case brazilianPortuguese = "pt-BR"
 }
 ```
 
-1.3. **Create CompositeG2PProcessor**
-```swift
-// LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/CompositeG2PProcessor.swift
-final class CompositeG2PProcessor: G2PProcessor {
-    private var misakiProcessor: MisakiG2PProcessor?
-    private var eSpeakProcessor: eSpeakNGG2PProcessor?
-    private var currentLanguage: Language?
-
-    // Serial queue for eSpeakNG calls - the C library uses global state
-    // and is NOT thread-safe. All eSpeakNG operations MUST go through this queue.
-    private static let eSpeakQueue = DispatchQueue(label: "com.kokorovoice.espeak-ng")
-
-    func setLanguage(_ language: Language) throws {
-        currentLanguage = language
-        switch language {
-        case .americanEnglish, .britishEnglish:
-            if misakiProcessor == nil { misakiProcessor = MisakiG2PProcessor() }
-            try misakiProcessor?.setLanguage(language)
-        default:
-            if eSpeakProcessor == nil { eSpeakProcessor = eSpeakNGG2PProcessor() }
-            // Serialize eSpeakNG language setting
-            try Self.eSpeakQueue.sync {
-                try eSpeakProcessor?.setLanguage(language)
-            }
-        }
-    }
-
-    func process(input: String) throws -> (String, [MToken]?) {
-        guard let language = currentLanguage else {
-            throw G2PProcessorError.processorNotInitialized
-        }
-        switch language {
-        case .americanEnglish, .britishEnglish:
-            return try misakiProcessor?.process(input: input) ?? ("", nil)
-        default:
-            // Serialize all eSpeakNG processing
-            return try Self.eSpeakQueue.sync {
-                try eSpeakProcessor?.process(input: input) ?? ("", nil)
-            }
-        }
-    }
-}
-```
-
-1.4. **Update G2PFactory**
-```swift
-// LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/G2PFactory.swift
-public enum G2P {
-    case misaki
-    case eSpeakNG
-    case composite  // NEW
-}
-
-// In createG2PProcessor:
-case .composite:
-    return CompositeG2PProcessor()
-```
-
-1.5. **Verify eSpeakNG builds**
-```bash
-cd LocalPackages/kokoro-ios
-swift build
-```
-
-1.6. **Phoneme compatibility validation**
-
-**Critical:** Confirm eSpeakNG output format matches Kokoro-82M expectations:
-
-```swift
-// Test phoneme output for each language
-func testPhonemeCompatibility() throws {
-    let processor = eSpeakNGG2PProcessor()
-
-    let testCases: [(Language, String, String)] = [
-        (.japanese, "こんにちは", "expected_ipa"),  // Validate IPA format
-        (.mandarinChinese, "你好", "expected_ipa"),
-        (.spanish, "Hola", "expected_ipa"),
-        // ... all languages
-    ]
-
-    for (language, text, _) in testCases {
-        try processor.setLanguage(language)
-        let (phonemes, _) = try processor.process(input: text)
-
-        // Validate: non-empty, IPA symbols, no unknown characters
-        XCTAssertFalse(phonemes.isEmpty)
-        XCTAssertTrue(phonemes.allSatisfy { isValidKokoroPhoneme($0) })
-    }
-}
-```
-
-**What to check:**
-- IPA symbol set matches Kokoro's vocabulary
-- Stress markers are handled correctly
-- Tone markers (for Chinese) are present and correct
-- Punctuation rules match expectations
-
-**If mismatch found:** Create a normalization layer before synthesis.
-
-1.7. **Early spike: End-to-end Japanese synthesis**
-
-Before scaling to 54 voices, verify a single non-English voice works:
-```bash
-# Download one Japanese voice embedding
-# Add jf_alpha.safetensors to Resources/voices/
-# Test synthesis with "こんにちは"
-```
-
-This validates the full pipeline (eSpeakNG → phonemes → model → audio) before investing in all voices.
-
-1.7. **Extension context validation spike**
-
-**Critical:** Validate eSpeakNG works in AudioUnit extension sandbox:
-```swift
-// Create a minimal test that runs IN the extension context
-// (not just host app unit tests)
-//
-// 1. Build and install extension
-// 2. Trigger synthesis via System Preferences → Spoken Content
-// 3. Verify eSpeakNG data resources are accessible
-// 4. Verify phonemization works in sandbox
-```
-
-**Why this matters:** AudioUnit extensions run in a restrictive sandbox. eSpeakNG's C library loads dictionary data from bundle resources. If bundle paths don't resolve correctly in extension context, non-English synthesis will fail silently.
-
-**Validation steps:**
-1. Add debug logging to eSpeakNGG2PProcessor for resource path resolution
-2. Test via System Preferences (not unit tests)
-3. Check Console.app for errors from extension process
-4. If resources fail to load, add `espeak-ng-data` to extension bundle via project.yml
-
-### Tests
-- eSpeakNG can phonemize Japanese text
-- eSpeakNG can phonemize Chinese text
-- CompositeG2PProcessor routes English to Misaki
-- CompositeG2PProcessor routes Japanese to eSpeakNG
-- **Single Japanese voice produces audio (spike validation)**
-- **eSpeakNG works in AudioUnit extension context (spike validation)**
-
-### Acceptance Criteria
-- [ ] Project builds without errors
-- [ ] eSpeakNG phonemizes non-English text correctly
-- [ ] Misaki still works for English
-- [ ] Japanese spike produces audio
-- [ ] Extension context spike validates eSpeakNG resources accessible
-
-## Phase 2: Add Voice Definitions
-
-**Goal:** Define all 54 voices in Constants.swift
-
-### Tasks
-
-2.1. **Add SupportedLanguage enum**
-
-**Language source clarification:**
-- **Runtime language** comes from `voiceDef.language` (looked up via `request.voice.identifier`)
-- **`match(bcp47:)`** is used for: (1) fallback voice selection, (2) language matching in Settings UI
-- The authoritative language for synthesis is always `voiceDef.language`, not system language
-
+2.2. **Add SupportedLanguage enum to Shared**
 ```swift
 // Shared/Constants.swift
 public enum SupportedLanguage: String, CaseIterable {
     case americanEnglish = "en-US"
     case britishEnglish = "en-GB"
-    case japanese = "ja-JP"
-    case mandarinChinese = "zh-CN"
     case spanish = "es-ES"
-    case french = "fr-FR"
-    case hindi = "hi-IN"
     case italian = "it-IT"
     case brazilianPortuguese = "pt-BR"
 
@@ -260,44 +223,17 @@ public enum SupportedLanguage: String, CaseIterable {
         switch self {
         case .americanEnglish: return "af_heart"
         case .britishEnglish: return "bf_emma"
-        case .japanese: return "jf_alpha"
-        case .mandarinChinese: return "zf_xiaobei"
         case .spanish: return "ef_dora"
-        case .french: return "ff_siwis"
-        case .hindi: return "hf_alpha"
         case .italian: return "if_sara"
         case .brazilianPortuguese: return "pf_dora"
-        }
-    }
-
-    /// Match BCP-47 language code to SupportedLanguage
-    /// Used for: fallback selection, Settings UI language grouping
-    /// NOT used for: runtime synthesis (that uses voiceDef.language directly)
-    static func match(bcp47 code: String) -> SupportedLanguage? {
-        // Exact match
-        if let exact = SupportedLanguage(rawValue: code) {
-            return exact
-        }
-        // Base language fallback
-        let base = code.split(separator: "-").first.map(String.init) ?? code
-        switch base {
-        case "en": return .americanEnglish
-        case "ja": return .japanese
-        case "zh": return .mandarinChinese
-        case "es": return .spanish
-        case "fr": return .french
-        case "hi": return .hindi
-        case "it": return .italian
-        case "pt": return .brazilianPortuguese
-        default: return nil
         }
     }
 }
 ```
 
-2.2. **Add missing English voices (10 total)**
+2.3. **Add missing English voices (10 total)**
 ```swift
-// Add to availableVoices:
+// Add to Constants.availableVoices:
 // en-US male (6 new)
 VoiceDefinition(id: "am_eric", name: "Eric", language: "en-US", gender: .male, quality: .b),
 VoiceDefinition(id: "am_fenrir", name: "Fenrir", language: "en-US", gender: .male, quality: .b),
@@ -306,106 +242,37 @@ VoiceDefinition(id: "am_onyx", name: "Onyx", language: "en-US", gender: .male, q
 VoiceDefinition(id: "am_puck", name: "Puck", language: "en-US", gender: .male, quality: .b),
 VoiceDefinition(id: "am_santa", name: "Santa", language: "en-US", gender: .male, quality: .b),
 
-// en-GB female (2 new)
+// en-GB (4 new)
 VoiceDefinition(id: "bf_isabella", name: "Isabella", language: "en-GB", gender: .female, quality: .b),
 VoiceDefinition(id: "bf_lily", name: "Lily", language: "en-GB", gender: .female, quality: .b),
-
-// en-GB male (2 new)
 VoiceDefinition(id: "bm_fable", name: "Fable", language: "en-GB", gender: .male, quality: .b),
 VoiceDefinition(id: "bm_lewis", name: "Lewis", language: "en-GB", gender: .male, quality: .b),
 ```
 
-2.3. **Add non-English voices (26 total)**
+2.4. **Add Romance language voices (8 total)**
 ```swift
-// Japanese (5)
-VoiceDefinition(id: "jf_alpha", name: "Alpha", language: "ja-JP", gender: .female, quality: .b),
-VoiceDefinition(id: "jf_gongitsune", name: "Gongitsune", language: "ja-JP", gender: .female, quality: .b),
-VoiceDefinition(id: "jf_nezumi", name: "Nezumi", language: "ja-JP", gender: .female, quality: .b),
-VoiceDefinition(id: "jf_tebukuro", name: "Tebukuro", language: "ja-JP", gender: .female, quality: .b),
-VoiceDefinition(id: "jm_kumo", name: "Kumo", language: "ja-JP", gender: .male, quality: .b),
-
-// Chinese (8)
-VoiceDefinition(id: "zf_xiaobei", name: "Xiaobei", language: "zh-CN", gender: .female, quality: .b),
-VoiceDefinition(id: "zf_xiaoni", name: "Xiaoni", language: "zh-CN", gender: .female, quality: .b),
-VoiceDefinition(id: "zf_xiaoxiao", name: "Xiaoxiao", language: "zh-CN", gender: .female, quality: .b),
-VoiceDefinition(id: "zf_xiaoyi", name: "Xiaoyi", language: "zh-CN", gender: .female, quality: .b),
-VoiceDefinition(id: "zm_yunjian", name: "Yunjian", language: "zh-CN", gender: .male, quality: .b),
-VoiceDefinition(id: "zm_yunxi", name: "Yunxi", language: "zh-CN", gender: .male, quality: .b),
-VoiceDefinition(id: "zm_yunxia", name: "Yunxia", language: "zh-CN", gender: .male, quality: .b),
-VoiceDefinition(id: "zm_yunyang", name: "Yunyang", language: "zh-CN", gender: .male, quality: .b),
-
 // Spanish (3)
 VoiceDefinition(id: "ef_dora", name: "Dora", language: "es-ES", gender: .female, quality: .b),
 VoiceDefinition(id: "em_alex", name: "Alex", language: "es-ES", gender: .male, quality: .b),
 VoiceDefinition(id: "em_santa", name: "Santa", language: "es-ES", gender: .male, quality: .b),
 
-// French (1)
-VoiceDefinition(id: "ff_siwis", name: "Siwis", language: "fr-FR", gender: .female, quality: .b),
-
-// Hindi (4)
-VoiceDefinition(id: "hf_alpha", name: "Alpha", language: "hi-IN", gender: .female, quality: .b),
-VoiceDefinition(id: "hf_beta", name: "Beta", language: "hi-IN", gender: .female, quality: .b),
-VoiceDefinition(id: "hm_omega", name: "Omega", language: "hi-IN", gender: .male, quality: .b),
-VoiceDefinition(id: "hm_psi", name: "Psi", language: "hi-IN", gender: .male, quality: .b),
-
 // Italian (2)
 VoiceDefinition(id: "if_sara", name: "Sara", language: "it-IT", gender: .female, quality: .b),
 VoiceDefinition(id: "im_nicola", name: "Nicola", language: "it-IT", gender: .male, quality: .b),
 
-// Portuguese (3)
+// Brazilian Portuguese (3)
 VoiceDefinition(id: "pf_dora", name: "Dora", language: "pt-BR", gender: .female, quality: .b),
 VoiceDefinition(id: "pm_alex", name: "Alex", language: "pt-BR", gender: .male, quality: .b),
 VoiceDefinition(id: "pm_santa", name: "Santa", language: "pt-BR", gender: .male, quality: .b),
 ```
 
-2.4. **Update defaultEnabledVoiceIds**
-```swift
-public static var defaultEnabledVoiceIds: [String] {
-    SupportedLanguage.allCases.map { $0.defaultVoiceId }
-}
-```
-
-2.5. **Add VoiceConfiguration validation**
-```swift
-// Shared/VoiceConfiguration.swift
-public var enabledVoiceIds: [String] {
-    let stored = userDefaults.stringArray(forKey: Constants.voicesKey) ?? []
-    let validIds = Set(Constants.availableVoices.map { $0.id })
-    let validated = stored.filter { validIds.contains($0) }
-    return validated.isEmpty ? Constants.defaultEnabledVoiceIds : validated
-}
-```
-
-### Tests
-- All 54 voice definitions have unique IDs
-- SupportedLanguage.match() handles all variants
-- Default voice exists for each language
-- VoiceConfiguration filters unknown IDs
-
-### Acceptance Criteria
-- [ ] 54 voices defined in Constants.swift
-- [ ] No duplicate voice IDs
-- [ ] Default voice per language works
-
-## Phase 3: Download Voice Embeddings
-
-**Goal:** Add all voice embedding files to project
-
-**Inventory clarification:**
-- **Current state:** 18 English voices already in repo (af_heart, af_bella, etc.)
-- **To download:** 36 new voices (10 missing English + 26 non-English)
-- **Final state:** 54 total voice embeddings in `Resources/voices/`
-
-### Tasks
-
-3.1. **Download embeddings from Hugging Face**
+2.5. **Download voice embeddings**
 ```bash
-# Update scripts/download-models.sh to include all 54 voices
-# Download 36 new files from mlx-community format (safetensors)
-# Existing 18 English voices remain unchanged
+# Update scripts/download-models.sh
+# Download 18 new .safetensors files from Hugging Face
 ```
 
-3.2. **Update project.yml for Shared framework resources**
+2.6. **Update project.yml for resources**
 ```yaml
 targets:
   KokoroVoiceShared:
@@ -415,264 +282,71 @@ targets:
         buildPhase: resources
 ```
 
-3.3. **Create checksums.txt**
-```bash
-# Generate SHA256 checksums for all voice files
-cd Resources/voices
-shasum -a 256 *.safetensors > checksums.txt
-```
-
-3.4. **Add build-time validation script**
-
-**Important:** Voices are in the **Shared framework bundle**, not the app bundle. The validation script must target the correct path.
-
-```bash
-#!/bin/bash
-# scripts/validate-voices.sh
-# Validates voice embeddings exist in the Shared framework bundle
-
-# For framework target: Resources are directly in framework bundle
-FRAMEWORK_DIR="${BUILT_PRODUCTS_DIR}/KokoroVoiceShared.framework"
-VOICES_DIR="${FRAMEWORK_DIR}/Versions/A/Resources/voices"
-
-# Fallback for embedded framework in app/extension
-if [ ! -d "${VOICES_DIR}" ]; then
-    VOICES_DIR="${BUILT_PRODUCTS_DIR}/${WRAPPER_NAME}/Contents/Frameworks/KokoroVoiceShared.framework/Versions/A/Resources/voices"
-fi
-
-if [ ! -d "${VOICES_DIR}" ]; then
-    echo "error: Could not find voices directory in framework bundle"
-    exit 1
-fi
-
-EXPECTED_VOICES=(af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis jf_alpha jf_gongitsune jf_nezumi jf_tebukuro jm_kumo zf_xiaobei zf_xiaoni zf_xiaoxiao zf_xiaoyi zm_yunjian zm_yunxi zm_yunxia zm_yunyang ef_dora em_alex em_santa ff_siwis hf_alpha hf_beta hm_omega hm_psi if_sara im_nicola pf_dora pm_alex pm_santa)
-
-for voice in "${EXPECTED_VOICES[@]}"; do
-    if [ ! -f "${VOICES_DIR}/${voice}.safetensors" ]; then
-        echo "error: Missing voice embedding: ${voice}.safetensors"
-        exit 1
-    fi
-done
-
-echo "All 54 voice embeddings validated in ${VOICES_DIR}"
-```
-
-3.5. **Integrate validation script into build process**
-
-**Where the script runs:**
-
-Validation runs on the **KokoroVoiceShared framework target only** (since that's where voices live). App and extension targets don't need their own validation - they just need to embed the framework.
-
-```yaml
-# project.yml - add to Shared framework target only
-targets:
-  KokoroVoiceShared:
-    postBuildScripts:
-      - script: "${PROJECT_DIR}/scripts/validate-voices.sh"
-        name: "Validate Voice Embeddings"
-
-  KokoroVoice:
-    # No voice validation needed - just verify framework is embedded
-    dependencies:
-      - framework: KokoroVoiceShared.framework
-        embed: true
-
-  KokoroVoiceExtension:
-    # No voice validation needed - just verify framework is embedded
-    dependencies:
-      - framework: KokoroVoiceShared.framework
-        embed: true
-```
-
-**CI Pipeline** (checksum validation in source, before build):
-```yaml
-- name: Validate voice checksums
-  run: |
-    cd Resources/voices
-    shasum -a 256 -c checksums.txt
-```
-
-**Behavior:**
-- Framework build: validates all 54 voices exist in framework bundle
-- App/Extension: automatically get voices via embedded framework
-- CI: validates checksums at source level before build starts
-
 ### Tests
-- All 54 .safetensors files exist
-- File sizes are reasonable (100-200KB each)
-- Checksums match
+- All 36 voice definitions exist and are unique
+- All 18 new .safetensors files are present
+- Voice IDs match expected pattern
 
 ### Acceptance Criteria
-- [ ] 54 voice embedding files in Resources/voices/
+- [ ] 18 new voice embedding files in Resources/voices/
+- [ ] All voices defined in Constants.swift
 - [ ] Files included in Shared framework bundle
-- [ ] Build validation passes for both app and extension targets
-- [ ] CI pipeline validates checksums
 
-## Error Behavior Specification
+---
 
-Define how each failure mode is handled:
+## Phase 3: Update Engine and AudioUnit
 
-| Scenario | Engine Behavior | AudioUnit Behavior | User Experience |
-|----------|-----------------|-------------------|-----------------|
-| Unknown voice ID | Throw `voiceEmbeddingLoadError` | Catch, log, signal error | VoiceOver announces error |
-| Missing embedding file | Fallback: language default → af_heart → throw | Catch, log, signal error | User hears fallback voice (or error if af_heart missing) |
-| Unsupported language | Return `nil` from match(), synthesis fails | Catch, log, signal error | VoiceOver announces error |
-| G2P failure | Throw from composite processor | Catch, log, signal error | VoiceOver announces error |
-| Empty text | Return empty audio buffer | Return empty buffer | Silent, no announcement |
-| eSpeakNG init failure | Use Misaki for English, fail non-English | Log warning | Non-English voices don't work |
-| Concurrent eSpeakNG calls | Serial queue ensures thread-safety | N/A | No impact (handled internally) |
-
-**Fallback chain:** Requested voice → Language default → af_heart (last resort) → Hard error
-
-**Key principle:** Never crash. Always log. Surface errors to system so VoiceOver can announce.
-
-## Phase 4: Update Engine
-
-**Goal:** Make KokoroEngine support multi-language synthesis
+**Goal:** Integrate Romance G2P and register voices with system
 
 ### Tasks
 
-4.1. **Update KokoroEngine to use composite G2P**
+3.1. **Create CompositeG2PProcessor**
+```swift
+// LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/CompositeG2PProcessor.swift
+final class CompositeG2PProcessor: G2PProcessor {
+    private var misakiProcessor: MisakiG2PProcessor?
+    private var romanceProcessor: RomanceG2PProcessor?
+    private var currentLanguage: Language?
+
+    func setLanguage(_ language: Language) throws {
+        currentLanguage = language
+        switch language {
+        case .americanEnglish, .britishEnglish:
+            if misakiProcessor == nil { misakiProcessor = MisakiG2PProcessor() }
+            try misakiProcessor?.setLanguage(language)
+        case .spanish, .italian, .brazilianPortuguese:
+            if romanceProcessor == nil { romanceProcessor = RomanceG2PProcessor() }
+            try romanceProcessor?.setLanguage(language)
+        }
+    }
+
+    func process(input: String) throws -> String {
+        guard let language = currentLanguage else {
+            throw G2PProcessorError.processorNotInitialized
+        }
+        switch language {
+        case .americanEnglish, .britishEnglish:
+            return try misakiProcessor?.process(input: input) ?? ""
+        case .spanish, .italian, .brazilianPortuguese:
+            return try romanceProcessor?.process(input: input) ?? ""
+        }
+    }
+}
+```
+
+3.2. **Update KokoroEngine for composite G2P**
 ```swift
 // Shared/KokoroEngine.swift
-// Change from:
-tts = try KokoroTTS(modelPath: modelFile, g2p: .misaki)
-// To:
 tts = try KokoroTTS(modelPath: modelFile, g2p: .composite)
 ```
 
-4.2. **Add voice embedding caching and loading**
-
-**Performance consideration:** Loading `.safetensors` files is expensive (~10-50ms per file). Since KokoroEngine is an actor, we can safely cache loaded embeddings.
-
-```swift
-// KokoroEngine.swift - voice embedding cache
-private var voiceEmbeddingCache: [String: MLXArray] = [:]
-private let maxCacheSize = 5  // Keep 5 most recently used voices in memory
-
-func loadVoiceEmbedding(voiceId: String, language: String) async throws -> MLXArray {
-    // 1. Check cache first
-    if let cached = voiceEmbeddingCache[voiceId] {
-        return cached
-    }
-
-    let bundle = Bundle(for: KokoroEngine.self)
-
-    // Validate voice ID
-    guard Constants.availableVoices.contains(where: { $0.id == voiceId }) else {
-        throw KokoroEngineError.voiceEmbeddingLoadError("Unknown voice: \(voiceId)")
-    }
-
-    // 2. Try requested voice
-    if let path = bundle.path(forResource: voiceId, ofType: "safetensors", inDirectory: "voices") {
-        let embedding = try await loadSafetensors(from: path)
-        cacheVoiceEmbedding(voiceId, embedding: embedding)
-        return embedding
-    }
-
-    // 3. Try language default
-    if let lang = SupportedLanguage(rawValue: language) {
-        let defaultId = lang.defaultVoiceId
-        if defaultId != voiceId,
-           let path = bundle.path(forResource: defaultId, ofType: "safetensors", inDirectory: "voices") {
-            print("KokoroEngine: Using \(defaultId) as fallback for \(voiceId)")
-            let embedding = try await loadSafetensors(from: path)
-            cacheVoiceEmbedding(defaultId, embedding: embedding)
-            return embedding
-        }
-    }
-
-    // 4. Last resort: af_heart (per spec fallback chain)
-    if voiceId != "af_heart",
-       let fallbackPath = bundle.path(forResource: "af_heart", ofType: "safetensors", inDirectory: "voices") {
-        print("KokoroEngine: Using af_heart as last resort fallback")
-        let embedding = try await loadSafetensors(from: fallbackPath)
-        cacheVoiceEmbedding("af_heart", embedding: embedding)
-        return embedding
-    }
-
-    // 5. Hard failure - no valid voice found
-    throw KokoroEngineError.voiceEmbeddingLoadError("Voice \(voiceId) not found and no fallback available")
-}
-
-private func cacheVoiceEmbedding(_ voiceId: String, embedding: MLXArray) {
-    // LRU eviction: remove oldest if at capacity
-    if voiceEmbeddingCache.count >= maxCacheSize {
-        // Simple FIFO eviction (could enhance with access timestamps)
-        if let oldest = voiceEmbeddingCache.keys.first {
-            voiceEmbeddingCache.removeValue(forKey: oldest)
-        }
-    }
-    voiceEmbeddingCache[voiceId] = embedding
-}
-```
-
-**Cache characteristics:**
-- **Size:** 5 voices (~500KB-1MB total memory)
-- **Thread-safety:** Actor isolation guarantees no races
-- **Eviction:** Arbitrary (Dictionary order is not guaranteed - acceptable for simple cache)
-- **Lifetime:** Cleared when engine is deinitialized
-
-**Note:** For a true LRU cache, use an ordered collection. For this use case, arbitrary eviction is acceptable since voice switching patterns are unpredictable.
-
-4.3. **Update synthesize method to accept language**
-```swift
-public func synthesize(text: String, voiceId: String, language: String) async throws -> [Float] {
-    // Set G2P language
-    let lang = Language(rawValue: language) ?? .americanEnglish
-    // ... synthesis logic
-}
-```
-
-### Tests
-- Synthesis works for each of 9 languages
-- Fallback chain works correctly
-- Error handling for missing voices
-
-### Acceptance Criteria
-- [ ] Japanese synthesis produces audio
-- [ ] Chinese synthesis produces audio
-- [ ] All 9 languages work
-- [ ] Fallback to default voice works
-
-## Phase 5: Update AudioUnit
-
-**Goal:** Register all voices with system
-
-### Tasks
-
-5.1. **Update speechVoices property with eSpeakNG availability gating**
-
-**Critical:** If eSpeakNG initialization fails, DO NOT register non-English voices with the system. This prevents users from selecting voices that cannot synthesize.
-
+3.3. **Update speechVoices property**
 ```swift
 // KokoroVoiceExtension/KokoroSynthesisAudioUnit.swift
-
-// Track eSpeakNG availability at init time
-private static var eSpeakNGAvailable: Bool = {
-    do {
-        let _ = try eSpeakNGG2PProcessor()
-        return true
-    } catch {
-        print("KokoroVoice: eSpeakNG unavailable, non-English voices disabled")
-        return false
-    }
-}()
-
 public override var speechVoices: [AVSpeechSynthesisProviderVoice] {
     let enabledVoiceIds = VoiceConfiguration.shared.enabledVoiceIds
     return Constants.availableVoices
-        .filter { voice in
-            // Must be enabled by user
-            guard enabledVoiceIds.contains(voice.id) else { return false }
-
-            // Gate non-English voices if eSpeakNG unavailable
-            if !Self.eSpeakNGAvailable {
-                let isEnglish = voice.language == "en-US" || voice.language == "en-GB"
-                if !isEnglish { return false }
-            }
-            return true
-        }
+        .filter { enabledVoiceIds.contains($0.id) }
         .map { voice in
             AVSpeechSynthesisProviderVoice(
                 name: voice.name,
@@ -684,13 +358,7 @@ public override var speechVoices: [AVSpeechSynthesisProviderVoice] {
 }
 ```
 
-**Behavior:** When eSpeakNG fails to init:
-- English voices continue to work (Misaki handles them)
-- Non-English voices are filtered out of system registration
-- No "broken" voices appear in System Preferences
-- User experience: limited functionality, but no silent failures
-
-5.2. **Update synthesizeSpeechRequest to pass language**
+3.4. **Update synthesizeSpeechRequest for language routing**
 ```swift
 override public func synthesizeSpeechRequest(_ request: AVSpeechSynthesisProviderRequest) {
     let voiceId = request.voice.identifier.replacingOccurrences(
@@ -698,282 +366,132 @@ override public func synthesizeSpeechRequest(_ request: AVSpeechSynthesisProvide
     )
 
     guard let voiceDef = Constants.voiceDefinition(forId: voiceId) else {
-        // Unknown voice
+        // Unknown voice - fail gracefully
         return
     }
 
     let language = voiceDef.language
-    // Pass language to engine
+    // Pass language to synthesis
 }
-```
-
-5.3. **GPL-3.0 Compliance**
-
-eSpeakNG is GPL-3.0 licensed. Required compliance steps with **specific file locations**:
-
-1. **Include license text**
-   - Create: `KokoroVoice/Resources/COPYING-GPL3.txt` (full GPL-3.0 text)
-   - Include in app bundle via project.yml resources
-   - Both host app and extension get the license automatically (linked framework)
-
-2. **Attribution in Credits**
-   - Create or update: `KokoroVoice/Resources/Credits.rtf`
-   - Content:
-   ```
-   This app uses:
-   - Kokoro-82M voice model (Apache-2.0, hexgrad)
-   - eSpeakNG text-to-phoneme engine (GPL-3.0, espeak-ng project)
-
-   Source code for this application available at:
-   https://github.com/[repo-url]
-   ```
-
-3. **project.yml integration**
-   ```yaml
-   targets:
-     KokoroVoice:
-       sources:
-         - path: KokoroVoice/Resources/Credits.rtf
-           buildPhase: resources
-         - path: KokoroVoice/Resources/COPYING-GPL3.txt
-           buildPhase: resources
-   ```
-
-4. **Source availability** - Ensure project repo is public or provide written offer for source
-
-**Note:** Legal review required before v1.0 public release. For beta testing, GPL compliance is straightforward since source is available.
-
-5.4. **Extension bundle resource verification**
-
-**Critical:** Verify the final packaged AudioUnit extension has access to all required resources:
-
-```bash
-#!/bin/bash
-# scripts/verify-extension-bundle.sh
-# Run AFTER building the extension
-
-EXTENSION_BUNDLE="${BUILT_PRODUCTS_DIR}/KokoroVoiceExtension.appex"
-FRAMEWORK_PATH="${EXTENSION_BUNDLE}/Contents/Frameworks/KokoroVoiceShared.framework"
-VOICES_PATH="${FRAMEWORK_PATH}/Versions/A/Resources/voices"
-
-# 1. Verify framework is embedded
-if [ ! -d "${FRAMEWORK_PATH}" ]; then
-    echo "error: KokoroVoiceShared.framework not embedded in extension"
-    exit 1
-fi
-
-# 2. Verify voices are accessible
-if [ ! -d "${VOICES_PATH}" ]; then
-    echo "error: Voices directory not found in embedded framework"
-    exit 1
-fi
-
-# 3. Verify voice count
-VOICE_COUNT=$(ls -1 "${VOICES_PATH}"/*.safetensors 2>/dev/null | wc -l)
-if [ "${VOICE_COUNT}" -lt 54 ]; then
-    echo "error: Expected 54 voice files, found ${VOICE_COUNT}"
-    exit 1
-fi
-
-# 4. Verify espeak-ng-data (if needed)
-# ESPEAK_DATA="${FRAMEWORK_PATH}/Versions/A/Resources/espeak-ng-data"
-# if [ ! -d "${ESPEAK_DATA}" ]; then
-#     echo "error: espeak-ng-data not found"
-#     exit 1
-# fi
-
-echo "Extension bundle verification passed: ${VOICE_COUNT} voices found"
-```
-
-Add to project.yml:
-```yaml
-targets:
-  KokoroVoiceExtension:
-    postBuildScripts:
-      - script: "${PROJECT_DIR}/scripts/verify-extension-bundle.sh"
-        name: "Verify Extension Bundle Resources"
 ```
 
 ### Tests
+- CompositeG2PProcessor routes English to Misaki
+- CompositeG2PProcessor routes Spanish/Italian/Portuguese to RomanceG2P
 - Voices appear in System Preferences
-- VoiceOver can select non-English voices
-- Voice count matches enabled voices
+- VoiceOver can select Romance voices
 
 ### Acceptance Criteria
-- [ ] All enabled voices appear in System Preferences
-- [ ] VoiceOver works with Japanese voices
-- [ ] GPL attribution present
-- [ ] Extension bundle verification script passes
+- [ ] English synthesis still works (Misaki)
+- [ ] Spanish synthesis works
+- [ ] Italian synthesis works
+- [ ] Portuguese synthesis works
+- [ ] All voices appear in System Preferences
 
-## Phase 6: Testing & Validation
+---
 
-**Goal:** Comprehensive testing across all languages
+## Phase 4: Testing and Validation
+
+**Goal:** Comprehensive testing and quality validation
 
 ### Tasks
 
-6.1. **Unit tests**
-- Voice definition uniqueness
-- Language matching (all BCP-47 variants including edge cases):
-  - `zh-Hans` → zh-CN
-  - `zh-Hant` → zh-CN (documented limitation)
-  - `pt-PT` → pt-BR
-  - `en-AU` → en-US
-  - `es-MX` → es-ES
-- VoiceConfiguration validation
-- Fallback chain logic
-- **eSpeakNG availability gating**: verify non-English voices excluded when eSpeakNG unavailable
-
-6.2. **Integration tests (CI-safe strategy)**
-
-**Test categorization:**
-- **Fast tests** (run on every PR): G2P routing, voice loading, language matching
-- **Slow tests** (run on dedicated lane): Full synthesis with audio validation
-
+4.1. **Unit tests**
 ```swift
-// Heavy synthesis tests - skipped by default, run only on main branch
-final class SynthesisIntegrationTests: XCTestCase {
+final class RomanceG2PTests: XCTestCase {
+    func testSpanishPhonemes() throws {
+        let processor = RomanceG2PProcessor()
+        try processor.setLanguage(.spanish)
 
-    override func setUpWithError() throws {
-        // Skip these tests unless running on main branch CI or explicitly enabled
-        try XCTSkipUnless(
-            ProcessInfo.processInfo.environment["RUN_SYNTHESIS_TESTS"] == "1",
-            "Skipping slow synthesis tests - set RUN_SYNTHESIS_TESTS=1 to enable"
-        )
+        let result = try processor.process(input: "Hola mundo")
+        XCTAssertFalse(result.isEmpty)
+        // Validate against expected phonemes
     }
 
-    func testSynthesizeAllLanguages() async throws {
-        let engine = KokoroEngine.shared
-        let testPhrases: [(String, String, String)] = [
-            ("en-US", "af_heart", "Hello world"),
-            ("ja-JP", "jf_alpha", "こんにちは"),
-            ("zh-CN", "zf_xiaobei", "你好世界"),
-            ("es-ES", "ef_dora", "Hola mundo"),
-            ("fr-FR", "ff_siwis", "Bonjour"),
-            ("hi-IN", "hf_alpha", "नमस्ते"),
-            ("it-IT", "if_sara", "Ciao"),
-            ("pt-BR", "pf_dora", "Olá"),
-        ]
+    func testItalianPhonemes() throws {
+        let processor = RomanceG2PProcessor()
+        try processor.setLanguage(.italian)
 
-        for (language, voiceId, text) in testPhrases {
-            let audio = try await engine.synthesize(text: text, voiceId: voiceId, language: language)
-            // Stronger assertions than just length
-            XCTAssertGreaterThan(audio.count, 1000, "Audio too short for \(language)")
-            XCTAssertTrue(audio.contains { $0 != 0 }, "Audio is all zeros for \(language)")
-        }
+        let result = try processor.process(input: "Ciao mondo")
+        XCTAssertFalse(result.isEmpty)
+    }
+
+    func testPortuguesePhonemes() throws {
+        let processor = RomanceG2PProcessor()
+        try processor.setLanguage(.brazilianPortuguese)
+
+        let result = try processor.process(input: "Olá mundo")
+        XCTAssertFalse(result.isEmpty)
     }
 }
 ```
 
-**CI configuration (concrete for this repo):**
+4.2. **Integration tests**
+```swift
+func testSynthesizeRomanceLanguages() async throws {
+    let engine = KokoroEngine.shared
 
-Since this repo currently has no CI, we define a practical approach.
+    let testPhrases: [(String, String, String)] = [
+        ("es-ES", "ef_dora", "Hola, ¿cómo estás?"),
+        ("it-IT", "if_sara", "Ciao, come stai?"),
+        ("pt-BR", "pf_dora", "Olá, como vai?"),
+    ]
 
-**Test runner decision:** This project uses XcodeGen + Xcode workspace. Use `xcodebuild` for CI (not `swift test`) to match local development.
-
-```yaml
-# .github/workflows/test.yml
-name: Tests
-on: [push, pull_request]
-
-jobs:
-  unit-tests:
-    runs-on: macos-14  # Apple Silicon (M1/M2)
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Generate Xcode project
-        run: |
-          cd KokoroVoice
-          xcodegen generate
-      - name: Run fast tests
-        run: |
-          cd KokoroVoice
-          xcodebuild test \
-            -project KokoroVoice.xcodeproj \
-            -scheme KokoroVoiceTests \
-            -destination 'platform=macOS' \
-            -skip-testing:SynthesisIntegrationTests
-
-  synthesis-tests:
-    runs-on: macos-14
-    timeout-minutes: 60  # Allow for slow CPU inference
-    if: github.ref == 'refs/heads/main'  # Only on main, not PRs
-    steps:
-      - uses: actions/checkout@v4
-      - name: Checkout voice files
-        run: |
-          # Voice files are regular git (not LFS) - just large
-          git checkout Resources/voices/
-      - name: Generate Xcode project
-        run: |
-          cd KokoroVoice
-          xcodegen generate
-      - name: Run synthesis tests
-        run: |
-          cd KokoroVoice
-          xcodebuild test \
-            -project KokoroVoice.xcodeproj \
-            -scheme KokoroVoiceTests \
-            -destination 'platform=macOS' \
-            -only-testing:SynthesisIntegrationTests
+    for (language, voiceId, text) in testPhrases {
+        let audio = try await engine.synthesize(text: text, voiceId: voiceId, language: language)
+        XCTAssertGreaterThan(audio.count, 1000, "Audio too short for \(language)")
+    }
+}
 ```
 
-**Git strategy for voice files (decided):**
-- **Plain git** (not LFS) for `.safetensors` files
-- Files are ~100-200KB each, 54 total = ~5-10MB - acceptable for plain git
-- Avoids LFS setup complexity for contributors
-- Spec says "checked into git" - we follow this literally
-- Add to `.gitattributes`: `*.safetensors binary` (mark as binary, not LFS)
-
-**Why xcodebuild:**
-- Project uses XcodeGen → Xcode project, not pure SPM
-- Matches developer workflow (Cmd+U in Xcode)
-- Better handling of framework embedding and code signing
-```
-
-6.3. **Manual testing checklist**
-- [ ] Japanese voice in System Preferences
-- [ ] Chinese voice with VoiceOver
-- [ ] Spanish voice with Live Speech
-- [ ] Voice switching between languages
-- [ ] Fallback when voice disabled
+4.3. **Manual testing checklist**
+- [ ] Spanish voices appear in System Preferences → Spoken Content
+- [ ] Italian voices appear in System Preferences → Spoken Content
+- [ ] Portuguese voices appear in System Preferences → Spoken Content
+- [ ] VoiceOver works with Spanish voice selected
+- [ ] VoiceOver works with Italian voice selected
+- [ ] VoiceOver works with Portuguese voice selected
+- [ ] Audio quality is acceptable for each language
 
 ### Acceptance Criteria
 - [ ] All unit tests pass
 - [ ] All integration tests pass
-- [ ] Manual testing complete
+- [ ] Manual testing checklist complete
+
+---
 
 ## File Changes Summary
 
 | File | Action | Lines |
 |------|--------|-------|
-| `LocalPackages/kokoro-ios/Package.swift` | Modify | +3 |
-| `LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/Language.swift` | Modify | +10 |
+| `LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/RomanceG2PProcessor.swift` | Create | ~300 |
+| `LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/PhonemeNormalizer.swift` | Create | ~50 |
 | `LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/CompositeG2PProcessor.swift` | Create | ~50 |
-| `LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/G2PFactory.swift` | Modify | +5 |
-| `Shared/Constants.swift` | Modify | +100 |
-| `Shared/KokoroEngine.swift` | Modify | +30 |
-| `Shared/VoiceConfiguration.swift` | Modify | +10 |
-| `KokoroVoiceExtension/KokoroSynthesisAudioUnit.swift` | Modify | +10 |
-| `Resources/voices/*.safetensors` | Create | 36 files |
-| `project.yml` | Modify | +5 |
-| `Tests/` | Modify | +50 |
+| `LocalPackages/kokoro-ios/Sources/KokoroSwift/TextProcessing/Language.swift` | Modify | +3 |
+| `Shared/Constants.swift` | Modify | +50 |
+| `Shared/KokoroEngine.swift` | Modify | +10 |
+| `KokoroVoiceExtension/KokoroSynthesisAudioUnit.swift` | Modify | +5 |
+| `Resources/voices/*.safetensors` | Create | 18 files |
+| `project.yml` | Modify | +3 |
+| `Tests/RomanceG2PTests.swift` | Create | ~100 |
 
-**Total:** ~200 new lines, ~100 modified lines, 36 new resource files
+**Total:** ~500 new lines of code, 18 new resource files
+
+---
 
 ## Risk Mitigation
 
 | Risk | Priority | Mitigation |
 |------|----------|------------|
-| **GPL-3.0 compliance** | CRITICAL | Include license text, ensure source availability, legal review before v1.0 |
-| eSpeakNG build fails | High | Test build early in Phase 1; have fallback to English-only |
-| **eSpeakNG thread-safety** | High | **Proactive:** Create serial queue for all eSpeakNG calls. The C library uses global state. |
-| **eSpeakNG extension sandbox** | High | **Validate in Phase 1 spike:** Test eSpeakNG data resources accessible from AudioUnit context |
-| Language tag edge cases | Medium | Test `zh-Hans`, `pt-PT`, `en-AU` variants; document expected routing |
-| Voice quality varies | Low | Document quality grades; user can disable low-quality voices |
-| App size too large | Low | ~5-10MB acceptable; on-demand download is future work |
+| Phoneme format mismatch | High | Compare output against espeak-ng reference; build normalization layer |
+| Rule-based G2P quality | Medium | Start with Spanish (most regular); iterate based on listening tests |
+| Voice embedding format | Low | Verify .safetensors files match existing English voices |
 
-## Dependencies
+---
 
-- eSpeakNGSwift ^1.0.1
-- Voice embeddings from hexgrad/Kokoro-82M (mlx-community format)
+## Success Criteria
+
+1. **All 36 voices work** - English + Romance synthesis functions correctly
+2. **No GPL dependencies** - Pure Swift rule-based G2P
+3. **Quality acceptable** - Audio sounds natural for all three Romance languages
+4. **System integration** - Voices appear in System Preferences, VoiceOver works
