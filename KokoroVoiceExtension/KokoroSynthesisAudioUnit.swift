@@ -3,11 +3,18 @@
 //
 // Main Audio Unit class implementing AVSpeechSynthesisProviderAudioUnit
 // for the Kokoro TTS Speech Synthesis Provider.
+//
+// Implements chunked audio streaming for low-latency playback:
+// - Audio plays within ~500ms of request (TTFA target)
+// - Progressive streaming while synthesis continues in background
+// - Graceful degradation on buffer underrun (silence, never block)
 
 import Foundation
 import AVFoundation
 import AudioToolbox
 import KokoroVoiceShared
+import os
+import Accelerate
 
 #if os(macOS)
 import AppKit
@@ -29,16 +36,10 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     /// Output busses array for audio routing
     private var _outputBusses: AUAudioUnitBusArray!
 
-    /// Current audio buffer containing synthesized speech
-    private var currentBuffer: AVAudioPCMBuffer?
-
-    /// Current position in the audio buffer (in frames)
-    private var framePosition: AVAudioFramePosition = 0
-
     /// Current speech request being processed
     private var currentRequest: AVSpeechSynthesisProviderRequest?
 
-    /// Serial queue for synthesis operations
+    /// Serial queue for synthesis operations (legacy mode)
     private let synthesisQueue = DispatchQueue(
         label: "com.kokorovoice.synthesis",
         qos: .userInteractive
@@ -47,14 +48,44 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     /// Flag indicating if the model is loaded and ready
     private var isModelReady = false
 
-    /// Lock for thread-safe buffer access
-    private let bufferLock = NSLock()
-
     /// Pending requests queue (for when model isn't ready)
     private var pendingRequests: [AVSpeechSynthesisProviderRequest] = []
 
-    /// Flag indicating synthesis completed with empty result
-    private var synthesisCompletedEmpty = false
+    // MARK: - Streaming Mode State
+
+    /// Thread-safe state lock (RT-safe, replaces NSLock)
+    private var stateLock = os_unfair_lock()
+
+    /// Active streaming buffer (thread-safe access via stateLock)
+    private var _activeStreamingBuffer: StreamingAudioBuffer?
+
+    /// Current synthesis task (thread-safe access via stateLock)
+    private var _currentSynthesisTask: Task<Void, Never>?
+
+    /// Whether streaming mode is enabled (validated at init)
+    private var useStreamingMode = true
+
+    // MARK: - Legacy Mode State (Non-streaming fallback)
+
+    /// Legacy: Current audio buffer containing synthesized speech
+    private var legacyBuffer: AVAudioPCMBuffer?
+
+    /// Legacy: Current position in the audio buffer (in frames)
+    private var legacyFramePosition: AVAudioFramePosition = 0
+
+    /// Legacy: Flag indicating synthesis completed with empty result
+    private var legacySynthesisCompletedEmpty = false
+
+    // MARK: - TTFA Tracking (DEBUG only)
+
+    #if DEBUG
+    /// Flag indicating if first speech frame has been emitted
+    private var hasEmittedFirstSpeech = false
+
+    /// Callback when first speech frame is rendered (for TTFA measurement)
+    /// Must be @Sendable because it's dispatched to main queue from render thread
+    public var onFirstSpeechFrame: (@Sendable () -> Void)?
+    #endif
 
     // MARK: - Initialization
 
@@ -78,12 +109,49 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
             throw NSError(domain: "KokoroSynthesisAudioUnit", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to create output bus: \(error)"])
         }
 
+        // Validate format for streaming mode
+        validateOutputFormat()
+
         // Load model asynchronously
         Task {
             await self.loadModel()
         }
 
-        print("KokoroSynthesisAudioUnit: Initialized with format \(outputFormat)")
+        print("KokoroSynthesisAudioUnit: Initialized with format \(outputFormat), streaming=\(useStreamingMode)")
+    }
+
+    // MARK: - Format Validation
+
+    /// Validate output format for streaming compatibility
+    private func validateOutputFormat() {
+        let format = _outputBusses[0].format
+
+        let isCompatible = format.sampleRate == Constants.sampleRate &&
+                           format.channelCount == 1 &&
+                           format.commonFormat == .pcmFormatFloat32
+
+        if !isCompatible {
+            useStreamingMode = false
+            print("KokoroSynthesisAudioUnit: Format mismatch (\(format.sampleRate)Hz, \(format.channelCount)ch), using non-streaming mode")
+        }
+    }
+
+    // MARK: - Thread-Safe Accessors
+
+    private var activeStreamingBuffer: StreamingAudioBuffer? {
+        get { withStateLock { _activeStreamingBuffer } }
+        set { withStateLock { _activeStreamingBuffer = newValue } }
+    }
+
+    private var currentSynthesisTask: Task<Void, Never>? {
+        get { withStateLock { _currentSynthesisTask } }
+        set { withStateLock { _currentSynthesisTask = newValue } }
+    }
+
+    private func withStateLock<T>(_ body: () -> T) -> T {
+        os_unfair_lock_lock(&stateLock)
+        defer { os_unfair_lock_unlock(&stateLock) }
+        return body()
     }
 
     // MARK: - Audio Unit Configuration
@@ -168,9 +236,20 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     /// Process any requests that were queued while model was loading
     private func processPendingRequests() async {
         for request in pendingRequests {
-            let ssml = request.ssmlRepresentation
-            let voiceIdentifier = request.voice.identifier
-            await performSynthesis(ssml: ssml, voiceIdentifier: voiceIdentifier)
+            if useStreamingMode {
+                let ssml = request.ssmlRepresentation
+                let voiceIdentifier = request.voice.identifier
+                let segments = SSMLParser.parse(ssml)
+                let voiceId = voiceIdentifier.replacingOccurrences(of: Constants.voiceIdentifierPrefix, with: "")
+
+                let buffer = StreamingAudioBuffer()
+                activeStreamingBuffer = buffer
+                await synthesizeSegmentsStreaming(segments, voiceId: voiceId, into: buffer)
+            } else {
+                let ssml = request.ssmlRepresentation
+                let voiceIdentifier = request.voice.identifier
+                await performSynthesisLegacy(ssml: ssml, voiceIdentifier: voiceIdentifier)
+            }
         }
         pendingRequests.removeAll()
     }
@@ -207,15 +286,15 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     public override func synthesizeSpeechRequest(_ speechRequest: AVSpeechSynthesisProviderRequest) {
         print("KokoroSynthesisAudioUnit: Received synthesis request")
 
+        // Cancel any existing synthesis
+        cancelCurrentSynthesis()
+
         // Store current request
         currentRequest = speechRequest
 
-        // Reset buffer state
-        bufferLock.lock()
-        currentBuffer = nil
-        framePosition = 0
-        synthesisCompletedEmpty = false
-        bufferLock.unlock()
+        #if DEBUG
+        hasEmittedFirstSpeech = false
+        #endif
 
         // If model isn't ready, queue the request
         guard isModelReady else {
@@ -224,27 +303,289 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
             return
         }
 
-        // Extract data from request synchronously (request may not be Sendable)
+        // Check streaming mode
+        guard useStreamingMode else {
+            synthesizeSpeechRequestLegacy(speechRequest)
+            return
+        }
+
+        // Parse SSML
+        let segments = SSMLParser.parse(speechRequest.ssmlRepresentation)
+        let voiceId = speechRequest.voice.identifier.replacingOccurrences(of: Constants.voiceIdentifierPrefix, with: "")
+
+        print("KokoroSynthesisAudioUnit: Synthesizing (streaming) for voice: \(voiceId), segments: \(segments.count)")
+
+        // Create fresh streaming buffer
+        let buffer = StreamingAudioBuffer()
+        activeStreamingBuffer = buffer
+
+        // Copy segments to ensure Sendable safety (SynthesisSegment is Equatable/value type)
+        let segmentsCopy = segments
+
+        // Start synthesis task
+        let task = Task { @Sendable [weak self] in
+            guard let self = self else { return }
+            await self.synthesizeSegmentsStreaming(segmentsCopy, voiceId: voiceId, into: buffer)
+        }
+        currentSynthesisTask = task
+    }
+
+    /// Synthesize segments into streaming buffer
+    private func synthesizeSegmentsStreaming(
+        _ segments: [SSMLParser.SynthesisSegment],
+        voiceId: String,
+        into buffer: StreamingAudioBuffer
+    ) async {
+        do {
+            for segment in segments {
+                // Check for cancellation
+                try Task.checkCancellation()
+
+                // Handle pause before segment
+                if segment.pauseBefore > 0 {
+                    let clampedPause = min(Float(segment.pauseBefore), StreamingAudioBuffer.maxPauseDuration)
+                    let silenceFrames = Int(clampedPause * Float(Constants.sampleRate))
+
+                    // Validate frame count
+                    guard silenceFrames > 0 && silenceFrames < Int.max / 2 else {
+                        continue // Skip invalid pause
+                    }
+
+                    let shouldContinue = await buffer.enqueue(.silence(frameCount: silenceFrames))
+                    if !shouldContinue { return } // Buffer was reset
+                }
+
+                // Skip empty text
+                let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+
+                // Check for cancellation before expensive synthesis
+                try Task.checkCancellation()
+
+                // Generate audio
+                let audio = try await KokoroEngine.shared.generateAudio(
+                    text: text,
+                    voiceId: voiceId,
+                    speed: segment.rate
+                )
+
+                // Validate audio samples (replace NaN/Inf with silence)
+                let validatedAudio = audio.map { sample -> Float in
+                    if sample.isNaN || sample.isInfinite {
+                        return 0.0
+                    }
+                    return sample
+                }
+
+                // Enqueue audio chunk
+                let shouldContinue = await buffer.enqueue(.audio(validatedAudio))
+                if !shouldContinue { return } // Buffer was reset
+            }
+
+            buffer.markComplete()
+
+        } catch is CancellationError {
+            // Clean exit on cancellation
+            print("KokoroSynthesisAudioUnit: Synthesis cancelled")
+        } catch {
+            print("KokoroSynthesisAudioUnit: Synthesis error: \(error)")
+            buffer.markFailed(error: error)
+        }
+    }
+
+    /// Cancel the current speech request
+    public override func cancelSpeechRequest() {
+        print("KokoroSynthesisAudioUnit: Cancelling speech request")
+        cancelCurrentSynthesis()
+        pendingRequests.removeAll()
+    }
+
+    /// Cancel current synthesis (thread-safe)
+    private func cancelCurrentSynthesis() {
+        // Get current task and buffer atomically
+        let (task, buffer) = withStateLock { () -> (Task<Void, Never>?, StreamingAudioBuffer?) in
+            let t = _currentSynthesisTask
+            let b = _activeStreamingBuffer
+            _currentSynthesisTask = nil
+            _activeStreamingBuffer = nil
+            return (t, b)
+        }
+
+        // Cancel outside the lock
+        task?.cancel()
+        buffer?.reset()
+
+        // Also clear legacy state
+        legacyBuffer = nil
+        legacyFramePosition = 0
+        legacySynthesisCompletedEmpty = false
+        currentRequest = nil
+    }
+
+    // MARK: - Audio Rendering
+
+    /// Internal render block that provides audio to the system
+    public override var internalRenderBlock: AUInternalRenderBlock {
+        return { [weak self] actionFlags, timestamp, frameCount, outputBusNumber, outputAudioBufferList, _, _ in
+            guard let self = self else {
+                return kAudio_ParamError
+            }
+
+            // Get output buffer pointer
+            let outputPtr = UnsafeMutableAudioBufferListPointer(outputAudioBufferList)
+            guard outputPtr.count > 0,
+                  let output = outputPtr[0].mData?.assumingMemoryBound(to: Float32.self) else {
+                return kAudio_ParamError
+            }
+
+            // Try streaming mode first
+            if let buffer = self.activeStreamingBuffer {
+                return self.renderStreaming(buffer: buffer, output: output, frameCount: frameCount, actionFlags: actionFlags)
+            }
+
+            // Fall back to legacy mode
+            return self.renderLegacy(output: output, frameCount: frameCount, actionFlags: actionFlags)
+        }
+    }
+
+    /// Render using streaming buffer
+    private func renderStreaming(
+        buffer: StreamingAudioBuffer,
+        output: UnsafeMutablePointer<Float32>,
+        frameCount: AVAudioFrameCount,
+        actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>
+    ) -> OSStatus {
+        // Wait for minimum buffer before starting playback
+        guard buffer.hasMinimumBuffer else {
+            vDSP_vclr(output, 1, vDSP_Length(frameCount))
+            return noErr
+        }
+
+        // Read frames from streaming buffer (never blocks)
+        let result = buffer.readFrames(into: output, count: frameCount)
+
+        // Fill remainder with silence if underrun
+        if result.framesRead < frameCount {
+            let remaining = frameCount - result.framesRead
+            vDSP_vclr(output + Int(result.framesRead), 1, vDSP_Length(remaining))
+        }
+
+        // TTFA tracking (RT-safe: set flag, dispatch callback off RT thread)
+        #if DEBUG
+        if result.wasSpeech && !self.hasEmittedFirstSpeech {
+            self.hasEmittedFirstSpeech = true
+            if let callback = self.onFirstSpeechFrame {
+                // Capture callback in a Sendable wrapper for dispatch
+                let callbackCopy = callback
+                DispatchQueue.main.async { @Sendable in
+                    callbackCopy()
+                }
+            }
+        }
+        #endif
+
+        // Signal completion when synthesis done AND buffer empty
+        if result.isComplete {
+            actionFlags.pointee = .offlineUnitRenderAction_Complete
+
+            if result.hadError {
+                print("KokoroSynthesisAudioUnit: Completed with synthesis error")
+            } else {
+                print("KokoroSynthesisAudioUnit: Streaming playback complete")
+            }
+
+            // Clean up reference
+            self.activeStreamingBuffer = nil
+        }
+
+        return noErr
+    }
+
+    /// Render using legacy buffer (non-streaming fallback)
+    private func renderLegacy(
+        output: UnsafeMutablePointer<Float32>,
+        frameCount: AVAudioFrameCount,
+        actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>
+    ) -> OSStatus {
+        // Check if synthesis completed with empty result
+        if legacySynthesisCompletedEmpty {
+            vDSP_vclr(output, 1, vDSP_Length(frameCount))
+            actionFlags.pointee = .offlineUnitRenderAction_Complete
+            legacySynthesisCompletedEmpty = false
+            print("KokoroSynthesisAudioUnit: Empty synthesis complete (legacy)")
+            return noErr
+        }
+
+        // Check if we have audio to output
+        guard let buffer = legacyBuffer,
+              let sourceChannelData = buffer.floatChannelData?[0] else {
+            // No audio ready - output silence
+            vDSP_vclr(output, 1, vDSP_Length(frameCount))
+            return noErr
+        }
+
+        let bufferLength = AVAudioFramePosition(buffer.frameLength)
+
+        // Calculate frames to copy
+        let framesRemaining = bufferLength - legacyFramePosition
+        let framesToCopy = min(AVAudioFramePosition(frameCount), framesRemaining)
+
+        if framesToCopy > 0 {
+            // Bulk copy using memcpy
+            let srcPtr = sourceChannelData + Int(legacyFramePosition)
+            memcpy(output, srcPtr, Int(framesToCopy) * MemoryLayout<Float>.size)
+            legacyFramePosition += framesToCopy
+        }
+
+        // Fill remainder with silence
+        if framesToCopy < frameCount {
+            let remaining = UInt32(frameCount) - UInt32(framesToCopy)
+            vDSP_vclr(output + Int(framesToCopy), 1, vDSP_Length(remaining))
+        }
+
+        // Check if we've finished playback
+        if legacyFramePosition >= bufferLength {
+            actionFlags.pointee = .offlineUnitRenderAction_Complete
+            legacyBuffer = nil
+            legacyFramePosition = 0
+            print("KokoroSynthesisAudioUnit: Playback complete (legacy)")
+        }
+
+        return noErr
+    }
+
+    // MARK: - Legacy Synthesis (Non-streaming fallback)
+
+    /// Handle synthesis request in legacy (non-streaming) mode
+    private func synthesizeSpeechRequestLegacy(_ speechRequest: AVSpeechSynthesisProviderRequest) {
+        print("KokoroSynthesisAudioUnit: Using legacy synthesis mode")
+
+        // Reset buffer state
+        legacyBuffer = nil
+        legacyFramePosition = 0
+        legacySynthesisCompletedEmpty = false
+
+        // Extract data from request
         let ssml = speechRequest.ssmlRepresentation
         let voiceIdentifier = speechRequest.voice.identifier
 
-        // Process synthesis using dispatch queue (avoiding Swift 6 sending parameter issues)
+        // Process synthesis using dispatch queue
         synthesisQueue.async { [self] in
             Task {
-                await self.performSynthesis(ssml: ssml, voiceIdentifier: voiceIdentifier)
+                await self.performSynthesisLegacy(ssml: ssml, voiceIdentifier: voiceIdentifier)
             }
         }
     }
 
-    /// Perform the actual speech synthesis
-    private func performSynthesis(ssml: String, voiceIdentifier: String) async {
+    /// Perform the actual speech synthesis (legacy mode)
+    private func performSynthesisLegacy(ssml: String, voiceIdentifier: String) async {
         // Parse SSML
         let segments = SSMLParser.parse(ssml)
 
         // Extract voice ID from identifier
         let voiceId = voiceIdentifier.replacingOccurrences(of: Constants.voiceIdentifierPrefix, with: "")
 
-        print("KokoroSynthesisAudioUnit: Synthesizing for voice: \(voiceId)")
+        print("KokoroSynthesisAudioUnit: Synthesizing (legacy) for voice: \(voiceId)")
         print("KokoroSynthesisAudioUnit: SSML segments: \(segments.count)")
 
         var allAudio: [Float] = []
@@ -276,116 +617,21 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
             }
         }
 
-        // Handle empty result - signal completion on next render
+        // Handle empty result
         guard !allAudio.isEmpty else {
-            print("KokoroSynthesisAudioUnit: No audio generated")
-            bufferLock.withLock {
-                synthesisCompletedEmpty = true
-            }
+            print("KokoroSynthesisAudioUnit: No audio generated (legacy)")
+            legacySynthesisCompletedEmpty = true
             return
         }
 
         // Create audio buffer
         let buffer = createAudioBuffer(from: allAudio)
 
-        // Update buffer atomically
-        bufferLock.withLock {
-            currentBuffer = buffer
-            framePosition = 0
-        }
+        // Update buffer
+        legacyBuffer = buffer
+        legacyFramePosition = 0
 
-        print("KokoroSynthesisAudioUnit: Audio buffer ready, \(allAudio.count) samples")
-    }
-
-    /// Cancel the current speech request
-    public override func cancelSpeechRequest() {
-        print("KokoroSynthesisAudioUnit: Cancelling speech request")
-
-        bufferLock.lock()
-        currentRequest = nil
-        currentBuffer = nil
-        framePosition = 0
-        synthesisCompletedEmpty = false
-        bufferLock.unlock()
-
-        pendingRequests.removeAll()
-    }
-
-    // MARK: - Audio Rendering
-
-    /// Internal render block that provides audio to the system
-    public override var internalRenderBlock: AUInternalRenderBlock {
-        return { [weak self] actionFlags, timestamp, frameCount, outputBusNumber, outputAudioBufferList, _, _ in
-            guard let self = self else {
-                return kAudio_ParamError
-            }
-
-            self.bufferLock.lock()
-            defer { self.bufferLock.unlock() }
-
-            // Get output buffer
-            let outputBufferListPointer = UnsafeMutableAudioBufferListPointer(outputAudioBufferList)
-            guard outputBufferListPointer.count > 0 else {
-                return kAudio_ParamError
-            }
-
-            let outputBuffer = outputBufferListPointer[0]
-            guard let outputFrames = outputBuffer.mData?.assumingMemoryBound(to: Float32.self) else {
-                return kAudio_ParamError
-            }
-
-            // Check if synthesis completed with empty result
-            if self.synthesisCompletedEmpty {
-                // Output silence and signal completion
-                for i in 0..<Int(frameCount) {
-                    outputFrames[i] = 0.0
-                }
-                actionFlags.pointee = .offlineUnitRenderAction_Complete
-                self.synthesisCompletedEmpty = false
-                print("KokoroSynthesisAudioUnit: Empty synthesis complete")
-                return noErr
-            }
-
-            // Check if we have audio to output
-            guard let buffer = self.currentBuffer,
-                  let sourceChannelData = buffer.floatChannelData?[0] else {
-                // No audio ready - output silence
-                for i in 0..<Int(frameCount) {
-                    outputFrames[i] = 0.0
-                }
-                return noErr
-            }
-
-            let bufferLength = AVAudioFramePosition(buffer.frameLength)
-
-            // Copy frames from our buffer to output
-            var framesWritten: AVAudioFrameCount = 0
-
-            for frame in 0..<frameCount {
-                if self.framePosition < bufferLength {
-                    outputFrames[Int(frame)] = sourceChannelData[Int(self.framePosition)]
-                    self.framePosition += 1
-                    framesWritten += 1
-                } else {
-                    // Past end of buffer - output silence
-                    outputFrames[Int(frame)] = 0.0
-                }
-            }
-
-            // Check if we've finished playback
-            if self.framePosition >= bufferLength {
-                // Signal completion
-                actionFlags.pointee = .offlineUnitRenderAction_Complete
-
-                // Clean up
-                self.currentBuffer = nil
-                self.framePosition = 0
-
-                print("KokoroSynthesisAudioUnit: Playback complete")
-            }
-
-            return noErr
-        }
+        print("KokoroSynthesisAudioUnit: Audio buffer ready (legacy), \(allAudio.count) samples")
     }
 
     // MARK: - Audio Buffer Creation
@@ -411,8 +657,9 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         buffer.frameLength = frameCount
 
         if let channelData = buffer.floatChannelData?[0] {
-            for (index, sample) in samples.enumerated() {
-                channelData[index] = sample
+            // Bulk copy
+            samples.withUnsafeBufferPointer { srcPtr in
+                _ = memcpy(channelData, srcPtr.baseAddress!, samples.count * MemoryLayout<Float>.size)
             }
         }
 

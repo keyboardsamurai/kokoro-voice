@@ -15,7 +15,7 @@ public struct SSMLParser {
     // MARK: - Synthesis Segment
 
     /// Represents a segment of text with its synthesis attributes
-    public struct SynthesisSegment: Equatable {
+    public struct SynthesisSegment: Equatable, Sendable {
         /// The text content to synthesize
         public let text: String
 
