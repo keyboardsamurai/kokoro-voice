@@ -275,8 +275,34 @@ extension VoiceConfiguration {
         language == "en-US" || id.hasPrefix("a")
     }
 
+    /// Check if voice is for Spanish
+    public var isSpanish: Bool {
+        language == "es-ES" || id.hasPrefix("e")
+    }
+
+    /// Check if voice is for Italian
+    public var isItalian: Bool {
+        language == "it-IT" || id.hasPrefix("i")
+    }
+
+    /// Check if voice is for Brazilian Portuguese
+    public var isBrazilianPortuguese: Bool {
+        language == "pt-BR" || id.hasPrefix("p")
+    }
+
+    /// Check if voice is for a Romance language (non-English)
+    public var isRomanceLanguage: Bool {
+        isSpanish || isItalian || isBrazilianPortuguese
+    }
+
     /// Get the Kokoro language enum value (for engine)
     public var kokoroLanguageCode: String {
-        isBritishEnglish ? "en-GB" : "en-US"
+        // Use the language property directly since it's always set
+        language
+    }
+
+    /// Get the supported language enum for this voice
+    public var supportedLanguage: SupportedLanguage? {
+        SupportedLanguage(rawValue: language)
     }
 }

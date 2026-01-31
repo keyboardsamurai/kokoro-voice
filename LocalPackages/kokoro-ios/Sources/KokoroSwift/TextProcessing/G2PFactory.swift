@@ -10,6 +10,9 @@ public enum G2P {
   case misaki
   /// eSpeak NG-based G2P engine supporting multiple languages.
   case eSpeakNG
+  /// Composite engine: Misaki for English, rule-based for Romance languages.
+  /// Use this for multi-language support without GPL dependencies.
+  case composite
 }
 
 /// Factory class for creating G2P processor instances.
@@ -31,7 +34,7 @@ final class G2PFactory {
   /// - Throws: `G2PError.noSuchEngine` if the requested engine is not available at compile time.
   static func createG2PProcessor(engine: G2P) throws -> G2PProcessor {
     switch engine {
-    
+
     case .misaki:
 #if canImport(MisakiSwift)
       return MisakiG2PProcessor()
@@ -45,6 +48,11 @@ final class G2PFactory {
 #else
       throw G2PError.noSuchEngine
 #endif
+
+    case .composite:
+      // Composite processor is always available - uses Misaki for English
+      // and rule-based for Romance languages
+      return CompositeG2PProcessor()
     }
   }
 }

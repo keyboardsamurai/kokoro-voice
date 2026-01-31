@@ -10,6 +10,8 @@ enum G2PProcessorError : Error {
   case processorNotInitialized
   /// The requested language is not supported by this processor.
   case unsupportedLanguage
+  /// The requested language is not supported by this processor (with language info).
+  case unsupportedLanguageCode(String)
 }
 
 /// Protocol defining the interface for grapheme-to-phoneme processors.
