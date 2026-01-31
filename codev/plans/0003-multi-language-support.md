@@ -41,8 +41,11 @@ Before proceeding with Phase 1, the project owner must explicitly decide:
 - Create follow-up spec for alternative phonemizer research
 
 ### Acceptance Criteria
-- [ ] GPL decision documented in project README or DECISIONS.md
-- [ ] If NO: alternative phonemizer approach identified before Phase 1
+- [ ] **BLOCKER:** GPL decision documented in project README or DECISIONS.md
+- [ ] If NO: alternative phonemizer approach identified - Phase 1+ cannot proceed
+- [ ] If YES: Project README updated with GPL-3.0 license notice
+
+**⚠️ GATE: Phase 1+ cannot begin until Phase 0 is complete and documented.**
 
 ---
 
@@ -51,6 +54,8 @@ Before proceeding with Phase 1, the project owner must explicitly decide:
 **Goal:** Get eSpeakNG dependency building and working
 
 **Prerequisite:** Phase 0 decision = YES (GPL acceptable)
+
+**eSpeakNG data resources:** The `eSpeakNGSwift` package includes `espeak-ng-data` dictionaries. These are bundled with the Swift package and accessed via `Bundle(for: eSpeakNGG2PProcessor.self)`. Verify this works in extension context during spike 1.8.
 
 ### Tasks
 
@@ -232,6 +237,12 @@ This validates the full pipeline (eSpeakNG → phonemes → model → audio) bef
 ### Tasks
 
 2.1. **Add SupportedLanguage enum**
+
+**Language source clarification:**
+- **Runtime language** comes from `voiceDef.language` (looked up via `request.voice.identifier`)
+- **`match(bcp47:)`** is used for: (1) fallback voice selection, (2) language matching in Settings UI
+- The authoritative language for synthesis is always `voiceDef.language`, not system language
+
 ```swift
 // Shared/Constants.swift
 public enum SupportedLanguage: String, CaseIterable {
@@ -259,13 +270,16 @@ public enum SupportedLanguage: String, CaseIterable {
         }
     }
 
-    static func match(systemLanguage: String) -> SupportedLanguage? {
+    /// Match BCP-47 language code to SupportedLanguage
+    /// Used for: fallback selection, Settings UI language grouping
+    /// NOT used for: runtime synthesis (that uses voiceDef.language directly)
+    static func match(bcp47 code: String) -> SupportedLanguage? {
         // Exact match
-        if let exact = SupportedLanguage(rawValue: systemLanguage) {
+        if let exact = SupportedLanguage(rawValue: code) {
             return exact
         }
         // Base language fallback
-        let base = systemLanguage.split(separator: "-").first.map(String.init) ?? systemLanguage
+        let base = code.split(separator: "-").first.map(String.init) ?? code
         switch base {
         case "en": return .americanEnglish
         case "ja": return .japanese
@@ -816,10 +830,16 @@ targets:
 - **Slow tests** (run on dedicated lane): Full synthesis with audio validation
 
 ```swift
-// Mark heavy synthesis tests for dedicated CI lane
-// These require model files and take significant time
-@available(*, message: "Run only on synthesis-test CI lane")
+// Heavy synthesis tests - skipped by default, run only on main branch
 final class SynthesisIntegrationTests: XCTestCase {
+
+    override func setUpWithError() throws {
+        // Skip these tests unless running on main branch CI or explicitly enabled
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["RUN_SYNTHESIS_TESTS"] == "1",
+            "Skipping slow synthesis tests - set RUN_SYNTHESIS_TESTS=1 to enable"
+        )
+    }
 
     func testSynthesizeAllLanguages() async throws {
         let engine = KokoroEngine.shared
