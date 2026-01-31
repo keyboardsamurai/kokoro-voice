@@ -125,20 +125,20 @@ projects:
   - id: "0003"
     title: "Multi-Language Support"
     summary: "Add 54 voices in 9 languages (Japanese, Chinese, Spanish, French, Hindi, Italian, Portuguese)"
-    status: conceived
+    status: planned
     priority: high
     files:
       spec: codev/specs/0003-multi-language-support.md
-      plan: null
+      plan: codev/plans/0003-multi-language-support.md
       review: null
     dependencies: []
     tags: [features, i18n, voices]
-    notes: "#1 blocker to broader adoption - 80% of potential users need non-English"
+    notes: "Spec approved 2025-01-31. Plan reviewed by Codex through 6 iterations - remaining issues are minor."
 ```
 
 ## Next Available Number
 
-**0003** - Reserve this number for your next project
+**0004** - Reserve this number for your next project
 
 ---
 
