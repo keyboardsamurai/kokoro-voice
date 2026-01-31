@@ -374,45 +374,79 @@ shasum -a 256 *.safetensors > checksums.txt
 ```
 
 3.4. **Add build-time validation script**
+
+**Important:** Voices are in the **Shared framework bundle**, not the app bundle. The validation script must target the correct path.
+
 ```bash
 #!/bin/bash
 # scripts/validate-voices.sh
-VOICES_DIR="${BUILT_PRODUCTS_DIR}/${WRAPPER_NAME}/Contents/Resources/voices"
-# Validate all expected voices exist
+# Validates voice embeddings exist in the Shared framework bundle
+
+# For framework target: Resources are directly in framework bundle
+FRAMEWORK_DIR="${BUILT_PRODUCTS_DIR}/KokoroVoiceShared.framework"
+VOICES_DIR="${FRAMEWORK_DIR}/Versions/A/Resources/voices"
+
+# Fallback for embedded framework in app/extension
+if [ ! -d "${VOICES_DIR}" ]; then
+    VOICES_DIR="${BUILT_PRODUCTS_DIR}/${WRAPPER_NAME}/Contents/Frameworks/KokoroVoiceShared.framework/Versions/A/Resources/voices"
+fi
+
+if [ ! -d "${VOICES_DIR}" ]; then
+    echo "error: Could not find voices directory in framework bundle"
+    exit 1
+fi
+
+EXPECTED_VOICES=(af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis jf_alpha jf_gongitsune jf_nezumi jf_tebukuro jm_kumo zf_xiaobei zf_xiaoni zf_xiaoxiao zf_xiaoyi zm_yunjian zm_yunxi zm_yunxia zm_yunyang ef_dora em_alex em_santa ff_siwis hf_alpha hf_beta hm_omega hm_psi if_sara im_nicola pf_dora pm_alex pm_santa)
+
+for voice in "${EXPECTED_VOICES[@]}"; do
+    if [ ! -f "${VOICES_DIR}/${voice}.safetensors" ]; then
+        echo "error: Missing voice embedding: ${voice}.safetensors"
+        exit 1
+    fi
+done
+
+echo "All 54 voice embeddings validated in ${VOICES_DIR}"
 ```
 
 3.5. **Integrate validation script into build process**
 
 **Where the script runs:**
 
-1. **Xcode Build Phase** (required for both app and extension):
-   ```yaml
-   # project.yml - add to both targets
-   targets:
-     KokoroVoice:
-       postBuildScripts:
-         - script: "${PROJECT_DIR}/scripts/validate-voices.sh"
-           name: "Validate Voice Embeddings"
+Validation runs on the **KokoroVoiceShared framework target only** (since that's where voices live). App and extension targets don't need their own validation - they just need to embed the framework.
 
-     KokoroVoiceExtension:
-       postBuildScripts:
-         - script: "${PROJECT_DIR}/scripts/validate-voices.sh"
-           name: "Validate Voice Embeddings"
-   ```
+```yaml
+# project.yml - add to Shared framework target only
+targets:
+  KokoroVoiceShared:
+    postBuildScripts:
+      - script: "${PROJECT_DIR}/scripts/validate-voices.sh"
+        name: "Validate Voice Embeddings"
 
-2. **CI Pipeline** (checksum validation):
-   ```yaml
-   # GitHub Actions / CI config
-   - name: Validate voice checksums
-     run: |
-       cd Resources/voices
-       shasum -a 256 -c checksums.txt
-   ```
+  KokoroVoice:
+    # No voice validation needed - just verify framework is embedded
+    dependencies:
+      - framework: KokoroVoiceShared.framework
+        embed: true
+
+  KokoroVoiceExtension:
+    # No voice validation needed - just verify framework is embedded
+    dependencies:
+      - framework: KokoroVoiceShared.framework
+        embed: true
+```
+
+**CI Pipeline** (checksum validation in source, before build):
+```yaml
+- name: Validate voice checksums
+  run: |
+    cd Resources/voices
+    shasum -a 256 -c checksums.txt
+```
 
 **Behavior:**
-- Local builds: script validates file presence, fails build if missing
-- CI builds: additionally validates checksums before release builds
-- Both app and extension targets run validation independently
+- Framework build: validates all 54 voices exist in framework bundle
+- App/Extension: automatically get voices via embedded framework
+- CI: validates checksums at source level before build starts
 
 ### Tests
 - All 54 .safetensors files exist
@@ -723,7 +757,9 @@ final class SynthesisIntegrationTests: XCTestCase {
 
 **CI configuration (concrete for this repo):**
 
-Since this repo currently has no CI, we define a practical approach:
+Since this repo currently has no CI, we define a practical approach.
+
+**Test runner decision:** This project uses XcodeGen + Xcode workspace. Use `xcodebuild` for CI (not `swift test`) to match local development.
 
 ```yaml
 # .github/workflows/test.yml
@@ -736,10 +772,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Generate Xcode project
+        run: |
+          cd KokoroVoice
+          xcodegen generate
       - name: Run fast tests
         run: |
           cd KokoroVoice
-          swift test --filter "!SynthesisIntegrationTests"
+          xcodebuild test \
+            -project KokoroVoice.xcodeproj \
+            -scheme KokoroVoiceTests \
+            -destination 'platform=macOS' \
+            -skip-testing:SynthesisIntegrationTests
 
   synthesis-tests:
     runs-on: macos-14
@@ -747,20 +791,35 @@ jobs:
     if: github.ref == 'refs/heads/main'  # Only on main, not PRs
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true  # Required for model files
+      - name: Checkout voice files
+        run: |
+          # Voice files are regular git (not LFS) - just large
+          git checkout Resources/voices/
+      - name: Generate Xcode project
+        run: |
+          cd KokoroVoice
+          xcodegen generate
       - name: Run synthesis tests
         run: |
           cd KokoroVoice
-          swift test --filter "SynthesisIntegrationTests"
+          xcodebuild test \
+            -project KokoroVoice.xcodeproj \
+            -scheme KokoroVoiceTests \
+            -destination 'platform=macOS' \
+            -only-testing:SynthesisIntegrationTests
 ```
 
-**Why this approach:**
-- **macos-14** is the standard macOS runner (no "xlarge" needed - CPU inference works)
-- **synthesis-tests on main only** prevents slow PR feedback loops
-- **60-minute timeout** accounts for CPU-only model inference
-- **Git LFS** required since model files are large
-- **No GPU** required - MLX runs on CPU for testing (slower but functional)
+**Git strategy for voice files (decided):**
+- **Plain git** (not LFS) for `.safetensors` files
+- Files are ~100-200KB each, 54 total = ~5-10MB - acceptable for plain git
+- Avoids LFS setup complexity for contributors
+- Spec says "checked into git" - we follow this literally
+- Add to `.gitattributes`: `*.safetensors binary` (mark as binary, not LFS)
+
+**Why xcodebuild:**
+- Project uses XcodeGen → Xcode project, not pure SPM
+- Matches developer workflow (Cmd+U in Xcode)
+- Better handling of framework embedding and code signing
 ```
 
 6.3. **Manual testing checklist**
