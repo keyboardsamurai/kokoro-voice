@@ -339,6 +339,39 @@ VOICES_DIR="${BUILT_PRODUCTS_DIR}/${WRAPPER_NAME}/Contents/Resources/voices"
 # Validate all expected voices exist
 ```
 
+3.5. **Integrate validation script into build process**
+
+**Where the script runs:**
+
+1. **Xcode Build Phase** (required for both app and extension):
+   ```yaml
+   # project.yml - add to both targets
+   targets:
+     KokoroVoice:
+       postBuildScripts:
+         - script: "${PROJECT_DIR}/scripts/validate-voices.sh"
+           name: "Validate Voice Embeddings"
+
+     KokoroVoiceExtension:
+       postBuildScripts:
+         - script: "${PROJECT_DIR}/scripts/validate-voices.sh"
+           name: "Validate Voice Embeddings"
+   ```
+
+2. **CI Pipeline** (checksum validation):
+   ```yaml
+   # GitHub Actions / CI config
+   - name: Validate voice checksums
+     run: |
+       cd Resources/voices
+       shasum -a 256 -c checksums.txt
+   ```
+
+**Behavior:**
+- Local builds: script validates file presence, fails build if missing
+- CI builds: additionally validates checksums before release builds
+- Both app and extension targets run validation independently
+
 ### Tests
 - All 54 .safetensors files exist
 - File sizes are reasonable (100-200KB each)
@@ -347,7 +380,8 @@ VOICES_DIR="${BUILT_PRODUCTS_DIR}/${WRAPPER_NAME}/Contents/Resources/voices"
 ### Acceptance Criteria
 - [ ] 54 voice embedding files in Resources/voices/
 - [ ] Files included in Shared framework bundle
-- [ ] Build validation passes
+- [ ] Build validation passes for both app and extension targets
+- [ ] CI pipeline validates checksums
 
 ## Error Behavior Specification
 
@@ -445,13 +479,38 @@ public func synthesize(text: String, voiceId: String, language: String) async th
 
 ### Tasks
 
-5.1. **Update speechVoices property**
+5.1. **Update speechVoices property with eSpeakNG availability gating**
+
+**Critical:** If eSpeakNG initialization fails, DO NOT register non-English voices with the system. This prevents users from selecting voices that cannot synthesize.
+
 ```swift
 // KokoroVoiceExtension/KokoroSynthesisAudioUnit.swift
+
+// Track eSpeakNG availability at init time
+private static var eSpeakNGAvailable: Bool = {
+    do {
+        let _ = try eSpeakNGG2PProcessor()
+        return true
+    } catch {
+        print("KokoroVoice: eSpeakNG unavailable, non-English voices disabled")
+        return false
+    }
+}()
+
 public override var speechVoices: [AVSpeechSynthesisProviderVoice] {
     let enabledVoiceIds = VoiceConfiguration.shared.enabledVoiceIds
     return Constants.availableVoices
-        .filter { enabledVoiceIds.contains($0.id) }
+        .filter { voice in
+            // Must be enabled by user
+            guard enabledVoiceIds.contains(voice.id) else { return false }
+
+            // Gate non-English voices if eSpeakNG unavailable
+            if !Self.eSpeakNGAvailable {
+                let isEnglish = voice.language == "en-US" || voice.language == "en-GB"
+                if !isEnglish { return false }
+            }
+            return true
+        }
         .map { voice in
             AVSpeechSynthesisProviderVoice(
                 name: voice.name,
@@ -462,6 +521,12 @@ public override var speechVoices: [AVSpeechSynthesisProviderVoice] {
         }
 }
 ```
+
+**Behavior:** When eSpeakNG fails to init:
+- English voices continue to work (Misaki handles them)
+- Non-English voices are filtered out of system registration
+- No "broken" voices appear in System Preferences
+- User experience: limited functionality, but no silent failures
 
 5.2. **Update synthesizeSpeechRequest to pass language**
 ```swift
@@ -516,9 +581,15 @@ https://github.com/[repo-url]
 
 6.1. **Unit tests**
 - Voice definition uniqueness
-- Language matching (all BCP-47 variants)
+- Language matching (all BCP-47 variants including edge cases):
+  - `zh-Hans` → zh-CN
+  - `zh-Hant` → zh-CN (documented limitation)
+  - `pt-PT` → pt-BR
+  - `en-AU` → en-US
+  - `es-MX` → es-ES
 - VoiceConfiguration validation
 - Fallback chain logic
+- **eSpeakNG availability gating**: verify non-English voices excluded when eSpeakNG unavailable
 
 6.2. **Integration tests**
 ```swift
