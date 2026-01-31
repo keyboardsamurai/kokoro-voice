@@ -143,7 +143,42 @@ cd LocalPackages/kokoro-ios
 swift build
 ```
 
-1.6. **Early spike: End-to-end Japanese synthesis**
+1.6. **Phoneme compatibility validation**
+
+**Critical:** Confirm eSpeakNG output format matches Kokoro-82M expectations:
+
+```swift
+// Test phoneme output for each language
+func testPhonemeCompatibility() throws {
+    let processor = eSpeakNGG2PProcessor()
+
+    let testCases: [(Language, String, String)] = [
+        (.japanese, "こんにちは", "expected_ipa"),  // Validate IPA format
+        (.mandarinChinese, "你好", "expected_ipa"),
+        (.spanish, "Hola", "expected_ipa"),
+        // ... all languages
+    ]
+
+    for (language, text, _) in testCases {
+        try processor.setLanguage(language)
+        let (phonemes, _) = try processor.process(input: text)
+
+        // Validate: non-empty, IPA symbols, no unknown characters
+        XCTAssertFalse(phonemes.isEmpty)
+        XCTAssertTrue(phonemes.allSatisfy { isValidKokoroPhoneme($0) })
+    }
+}
+```
+
+**What to check:**
+- IPA symbol set matches Kokoro's vocabulary
+- Stress markers are handled correctly
+- Tone markers (for Chinese) are present and correct
+- Punctuation rules match expectations
+
+**If mismatch found:** Create a normalization layer before synthesis.
+
+1.7. **Early spike: End-to-end Japanese synthesis**
 
 Before scaling to 54 voices, verify a single non-English voice works:
 ```bash
@@ -561,8 +596,10 @@ private func cacheVoiceEmbedding(_ voiceId: String, embedding: MLXArray) {
 **Cache characteristics:**
 - **Size:** 5 voices (~500KB-1MB total memory)
 - **Thread-safety:** Actor isolation guarantees no races
-- **Eviction:** Simple FIFO (sufficient for typical usage patterns)
+- **Eviction:** Arbitrary (Dictionary order is not guaranteed - acceptable for simple cache)
 - **Lifetime:** Cleared when engine is deinitialized
+
+**Note:** For a true LRU cache, use an ordered collection. For this use case, arbitrary eviction is acceptable since voice switching patterns are unpredictable.
 
 4.3. **Update synthesize method to accept language**
 ```swift
@@ -692,6 +729,57 @@ eSpeakNG is GPL-3.0 licensed. Required compliance steps with **specific file loc
 
 **Note:** Legal review required before v1.0 public release. For beta testing, GPL compliance is straightforward since source is available.
 
+5.4. **Extension bundle resource verification**
+
+**Critical:** Verify the final packaged AudioUnit extension has access to all required resources:
+
+```bash
+#!/bin/bash
+# scripts/verify-extension-bundle.sh
+# Run AFTER building the extension
+
+EXTENSION_BUNDLE="${BUILT_PRODUCTS_DIR}/KokoroVoiceExtension.appex"
+FRAMEWORK_PATH="${EXTENSION_BUNDLE}/Contents/Frameworks/KokoroVoiceShared.framework"
+VOICES_PATH="${FRAMEWORK_PATH}/Versions/A/Resources/voices"
+
+# 1. Verify framework is embedded
+if [ ! -d "${FRAMEWORK_PATH}" ]; then
+    echo "error: KokoroVoiceShared.framework not embedded in extension"
+    exit 1
+fi
+
+# 2. Verify voices are accessible
+if [ ! -d "${VOICES_PATH}" ]; then
+    echo "error: Voices directory not found in embedded framework"
+    exit 1
+fi
+
+# 3. Verify voice count
+VOICE_COUNT=$(ls -1 "${VOICES_PATH}"/*.safetensors 2>/dev/null | wc -l)
+if [ "${VOICE_COUNT}" -lt 54 ]; then
+    echo "error: Expected 54 voice files, found ${VOICE_COUNT}"
+    exit 1
+fi
+
+# 4. Verify espeak-ng-data (if needed)
+# ESPEAK_DATA="${FRAMEWORK_PATH}/Versions/A/Resources/espeak-ng-data"
+# if [ ! -d "${ESPEAK_DATA}" ]; then
+#     echo "error: espeak-ng-data not found"
+#     exit 1
+# fi
+
+echo "Extension bundle verification passed: ${VOICE_COUNT} voices found"
+```
+
+Add to project.yml:
+```yaml
+targets:
+  KokoroVoiceExtension:
+    postBuildScripts:
+      - script: "${PROJECT_DIR}/scripts/verify-extension-bundle.sh"
+        name: "Verify Extension Bundle Resources"
+```
+
 ### Tests
 - Voices appear in System Preferences
 - VoiceOver can select non-English voices
@@ -701,6 +789,7 @@ eSpeakNG is GPL-3.0 licensed. Required compliance steps with **specific file loc
 - [ ] All enabled voices appear in System Preferences
 - [ ] VoiceOver works with Japanese voices
 - [ ] GPL attribution present
+- [ ] Extension bundle verification script passes
 
 ## Phase 6: Testing & Validation
 
