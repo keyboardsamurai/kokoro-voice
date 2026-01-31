@@ -306,12 +306,18 @@ public var enabledVoiceIds: [String] {
 
 **Goal:** Add all voice embedding files to project
 
+**Inventory clarification:**
+- **Current state:** 18 English voices already in repo (af_heart, af_bella, etc.)
+- **To download:** 36 new voices (10 missing English + 26 non-English)
+- **Final state:** 54 total voice embeddings in `Resources/voices/`
+
 ### Tasks
 
 3.1. **Download embeddings from Hugging Face**
 ```bash
 # Update scripts/download-models.sh to include all 54 voices
-# Download from mlx-community format (safetensors)
+# Download 36 new files from mlx-community format (safetensors)
+# Existing 18 English voices remain unchanged
 ```
 
 3.2. **Update project.yml for Shared framework resources**
@@ -547,19 +553,37 @@ override public func synthesizeSpeechRequest(_ request: AVSpeechSynthesisProvide
 
 5.3. **GPL-3.0 Compliance**
 
-eSpeakNG is GPL-3.0 licensed. Required compliance steps:
+eSpeakNG is GPL-3.0 licensed. Required compliance steps with **specific file locations**:
 
-1. **Include license text** - Add `COPYING.txt` with GPL-3.0 text to app bundle
+1. **Include license text**
+   - Create: `KokoroVoice/Resources/COPYING-GPL3.txt` (full GPL-3.0 text)
+   - Include in app bundle via project.yml resources
+   - Both host app and extension get the license automatically (linked framework)
+
 2. **Attribution in Credits**
-```
-This app uses:
-- Kokoro-82M voice model (Apache-2.0, hexgrad)
-- eSpeakNG text-to-phoneme engine (GPL-3.0, espeak-ng project)
+   - Create or update: `KokoroVoice/Resources/Credits.rtf`
+   - Content:
+   ```
+   This app uses:
+   - Kokoro-82M voice model (Apache-2.0, hexgrad)
+   - eSpeakNG text-to-phoneme engine (GPL-3.0, espeak-ng project)
 
-Source code for this application available at:
-https://github.com/[repo-url]
-```
-3. **Source availability** - Ensure project repo is public or provide written offer for source
+   Source code for this application available at:
+   https://github.com/[repo-url]
+   ```
+
+3. **project.yml integration**
+   ```yaml
+   targets:
+     KokoroVoice:
+       sources:
+         - path: KokoroVoice/Resources/Credits.rtf
+           buildPhase: resources
+         - path: KokoroVoice/Resources/COPYING-GPL3.txt
+           buildPhase: resources
+   ```
+
+4. **Source availability** - Ensure project repo is public or provide written offer for source
 
 **Note:** Legal review required before v1.0 public release. For beta testing, GPL compliance is straightforward since source is available.
 
@@ -591,26 +615,56 @@ https://github.com/[repo-url]
 - Fallback chain logic
 - **eSpeakNG availability gating**: verify non-English voices excluded when eSpeakNG unavailable
 
-6.2. **Integration tests**
-```swift
-func testSynthesizeAllLanguages() async throws {
-    let engine = KokoroEngine.shared
-    let testPhrases: [(String, String, String)] = [
-        ("en-US", "af_heart", "Hello world"),
-        ("ja-JP", "jf_alpha", "こんにちは"),
-        ("zh-CN", "zf_xiaobei", "你好世界"),
-        ("es-ES", "ef_dora", "Hola mundo"),
-        ("fr-FR", "ff_siwis", "Bonjour"),
-        ("hi-IN", "hf_alpha", "नमस्ते"),
-        ("it-IT", "if_sara", "Ciao"),
-        ("pt-BR", "pf_dora", "Olá"),
-    ]
+6.2. **Integration tests (CI-safe strategy)**
 
-    for (language, voiceId, text) in testPhrases {
-        let audio = try await engine.synthesize(text: text, voiceId: voiceId, language: language)
-        XCTAssertGreaterThan(audio.count, 1000, "No audio for \(language)")
+**Test categorization:**
+- **Fast tests** (run on every PR): G2P routing, voice loading, language matching
+- **Slow tests** (run on dedicated lane): Full synthesis with audio validation
+
+```swift
+// Mark heavy synthesis tests for dedicated CI lane
+// These require model files and take significant time
+@available(*, message: "Run only on synthesis-test CI lane")
+final class SynthesisIntegrationTests: XCTestCase {
+
+    func testSynthesizeAllLanguages() async throws {
+        let engine = KokoroEngine.shared
+        let testPhrases: [(String, String, String)] = [
+            ("en-US", "af_heart", "Hello world"),
+            ("ja-JP", "jf_alpha", "こんにちは"),
+            ("zh-CN", "zf_xiaobei", "你好世界"),
+            ("es-ES", "ef_dora", "Hola mundo"),
+            ("fr-FR", "ff_siwis", "Bonjour"),
+            ("hi-IN", "hf_alpha", "नमस्ते"),
+            ("it-IT", "if_sara", "Ciao"),
+            ("pt-BR", "pf_dora", "Olá"),
+        ]
+
+        for (language, voiceId, text) in testPhrases {
+            let audio = try await engine.synthesize(text: text, voiceId: voiceId, language: language)
+            // Stronger assertions than just length
+            XCTAssertGreaterThan(audio.count, 1000, "Audio too short for \(language)")
+            XCTAssertTrue(audio.contains { $0 != 0 }, "Audio is all zeros for \(language)")
+        }
     }
 }
+```
+
+**CI configuration:**
+```yaml
+# GitHub Actions example
+jobs:
+  fast-tests:
+    runs-on: macos-latest
+    steps:
+      - run: swift test --filter "!SynthesisIntegrationTests"
+
+  synthesis-tests:
+    runs-on: macos-latest-xlarge  # Dedicated lane with GPU
+    if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'run-synthesis-tests')
+    steps:
+      - run: swift test --filter "SynthesisIntegrationTests"
+```
 ```
 
 6.3. **Manual testing checklist**
