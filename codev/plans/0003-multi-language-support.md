@@ -12,9 +12,45 @@ This plan implements multi-language TTS support for KokoroVoice, adding 36 new v
 3. Update engine for language-aware G2P selection
 4. Register all voices with system
 
+## Phase 0: GPL-3.0 Decision Gate
+
+**Goal:** Explicit go/no-go decision on eSpeakNG licensing before any code lands
+
+**Background:** eSpeakNG is GPL-3.0 licensed. Linking (static or dynamic) a GPL-3 library into a distributed macOS app imposes GPL obligations on the **entire combined work**.
+
+### Decision Required
+
+Before proceeding with Phase 1, the project owner must explicitly decide:
+
+| Question | Decision | Implications |
+|----------|----------|--------------|
+| Is GPL-3.0 acceptable for this project? | **YES** or **NO** | Determines whether we proceed with eSpeakNG |
+| Distribution channel? | Direct download / Mac App Store / Both | App Store may have additional restrictions |
+| Source availability? | Public repo / Written offer / Both | Required by GPL-3.0 |
+
+**If YES (GPL acceptable):**
+- Proceed with eSpeakNG as planned
+- Ensure source availability (public repo or written offer)
+- Include full GPL-3.0 license text in app bundle
+- Document in README that project is GPL-3.0 due to eSpeakNG dependency
+
+**If NO (GPL not acceptable):**
+- **Alternative 1:** Investigate MFA (Mozilla Festival Agreement) phonemizers
+- **Alternative 2:** Use English-only mode (Misaki) and defer multi-language
+- **Alternative 3:** Build/ship eSpeakNG as separate process (IPC) to isolate GPL scope
+- Create follow-up spec for alternative phonemizer research
+
+### Acceptance Criteria
+- [ ] GPL decision documented in project README or DECISIONS.md
+- [ ] If NO: alternative phonemizer approach identified before Phase 1
+
+---
+
 ## Phase 1: Enable eSpeakNG G2P
 
 **Goal:** Get eSpeakNG dependency building and working
+
+**Prerequisite:** Phase 0 decision = YES (GPL acceptable)
 
 ### Tasks
 
@@ -422,9 +458,21 @@ tts = try KokoroTTS(modelPath: modelFile, g2p: .misaki)
 tts = try KokoroTTS(modelPath: modelFile, g2p: .composite)
 ```
 
-4.2. **Add language-aware voice loading**
+4.2. **Add voice embedding caching and loading**
+
+**Performance consideration:** Loading `.safetensors` files is expensive (~10-50ms per file). Since KokoroEngine is an actor, we can safely cache loaded embeddings.
+
 ```swift
+// KokoroEngine.swift - voice embedding cache
+private var voiceEmbeddingCache: [String: MLXArray] = [:]
+private let maxCacheSize = 5  // Keep 5 most recently used voices in memory
+
 func loadVoiceEmbedding(voiceId: String, language: String) async throws -> MLXArray {
+    // 1. Check cache first
+    if let cached = voiceEmbeddingCache[voiceId] {
+        return cached
+    }
+
     let bundle = Bundle(for: KokoroEngine.self)
 
     // Validate voice ID
@@ -432,32 +480,55 @@ func loadVoiceEmbedding(voiceId: String, language: String) async throws -> MLXAr
         throw KokoroEngineError.voiceEmbeddingLoadError("Unknown voice: \(voiceId)")
     }
 
-    // 1. Try requested voice
+    // 2. Try requested voice
     if let path = bundle.path(forResource: voiceId, ofType: "safetensors", inDirectory: "voices") {
-        return try await loadSafetensors(from: path)
+        let embedding = try await loadSafetensors(from: path)
+        cacheVoiceEmbedding(voiceId, embedding: embedding)
+        return embedding
     }
 
-    // 2. Try language default
+    // 3. Try language default
     if let lang = SupportedLanguage(rawValue: language) {
         let defaultId = lang.defaultVoiceId
         if defaultId != voiceId,
            let path = bundle.path(forResource: defaultId, ofType: "safetensors", inDirectory: "voices") {
             print("KokoroEngine: Using \(defaultId) as fallback for \(voiceId)")
-            return try await loadSafetensors(from: path)
+            let embedding = try await loadSafetensors(from: path)
+            cacheVoiceEmbedding(defaultId, embedding: embedding)
+            return embedding
         }
     }
 
-    // 3. Last resort: af_heart (per spec fallback chain)
+    // 4. Last resort: af_heart (per spec fallback chain)
     if voiceId != "af_heart",
        let fallbackPath = bundle.path(forResource: "af_heart", ofType: "safetensors", inDirectory: "voices") {
         print("KokoroEngine: Using af_heart as last resort fallback")
-        return try await loadSafetensors(from: fallbackPath)
+        let embedding = try await loadSafetensors(from: fallbackPath)
+        cacheVoiceEmbedding("af_heart", embedding: embedding)
+        return embedding
     }
 
-    // 4. Hard failure - no valid voice found
+    // 5. Hard failure - no valid voice found
     throw KokoroEngineError.voiceEmbeddingLoadError("Voice \(voiceId) not found and no fallback available")
 }
+
+private func cacheVoiceEmbedding(_ voiceId: String, embedding: MLXArray) {
+    // LRU eviction: remove oldest if at capacity
+    if voiceEmbeddingCache.count >= maxCacheSize {
+        // Simple FIFO eviction (could enhance with access timestamps)
+        if let oldest = voiceEmbeddingCache.keys.first {
+            voiceEmbeddingCache.removeValue(forKey: oldest)
+        }
+    }
+    voiceEmbeddingCache[voiceId] = embedding
+}
 ```
+
+**Cache characteristics:**
+- **Size:** 5 voices (~500KB-1MB total memory)
+- **Thread-safety:** Actor isolation guarantees no races
+- **Eviction:** Simple FIFO (sufficient for typical usage patterns)
+- **Lifetime:** Cleared when engine is deinitialized
 
 4.3. **Update synthesize method to accept language**
 ```swift
@@ -650,21 +721,46 @@ final class SynthesisIntegrationTests: XCTestCase {
 }
 ```
 
-**CI configuration:**
+**CI configuration (concrete for this repo):**
+
+Since this repo currently has no CI, we define a practical approach:
+
 ```yaml
-# GitHub Actions example
+# .github/workflows/test.yml
+name: Tests
+on: [push, pull_request]
+
 jobs:
-  fast-tests:
-    runs-on: macos-latest
+  unit-tests:
+    runs-on: macos-14  # Apple Silicon (M1/M2)
+    timeout-minutes: 15
     steps:
-      - run: swift test --filter "!SynthesisIntegrationTests"
+      - uses: actions/checkout@v4
+      - name: Run fast tests
+        run: |
+          cd KokoroVoice
+          swift test --filter "!SynthesisIntegrationTests"
 
   synthesis-tests:
-    runs-on: macos-latest-xlarge  # Dedicated lane with GPU
-    if: github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'run-synthesis-tests')
+    runs-on: macos-14
+    timeout-minutes: 60  # Allow for slow CPU inference
+    if: github.ref == 'refs/heads/main'  # Only on main, not PRs
     steps:
-      - run: swift test --filter "SynthesisIntegrationTests"
+      - uses: actions/checkout@v4
+        with:
+          lfs: true  # Required for model files
+      - name: Run synthesis tests
+        run: |
+          cd KokoroVoice
+          swift test --filter "SynthesisIntegrationTests"
 ```
+
+**Why this approach:**
+- **macos-14** is the standard macOS runner (no "xlarge" needed - CPU inference works)
+- **synthesis-tests on main only** prevents slow PR feedback loops
+- **60-minute timeout** accounts for CPU-only model inference
+- **Git LFS** required since model files are large
+- **No GPU** required - MLX runs on CPU for testing (slower but functional)
 ```
 
 6.3. **Manual testing checklist**
