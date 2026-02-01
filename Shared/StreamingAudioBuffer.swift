@@ -154,8 +154,15 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
             let (shouldWait, resetFlag) = withLock {
                 if isReset { return (false, true) }
                 let buffered = totalFramesEnqueued - totalFramesRead
-                // Check if adding this chunk would exceed max buffer
-                // This prevents overshooting when enqueuing large chunks
+
+                // Special case: if chunk is larger than max buffer, only wait if buffer non-empty
+                // This prevents deadlock on oversized chunks (which shouldn't happen after
+                // KokoroSynthesisAudioUnit's chunk splitting, but we handle it defensively)
+                if incomingFrames > Self.maxBufferedFrames {
+                    return (buffered > 0, false)
+                }
+
+                // Normal case: check if adding this chunk would exceed max buffer
                 return (buffered + incomingFrames > Self.maxBufferedFrames, false)
             }
 
@@ -169,7 +176,13 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
         // Now enqueue with lock held briefly
         let enqueued = withLock { () -> Bool in
             guard !isReset else { return false }
-            guard ringCount < Self.ringCapacity else { return false }
+
+            // If ring is full, drop chunk but don't stop synthesis
+            // (Same behavior as chunk limit - graceful degradation)
+            guard ringCount < Self.ringCapacity else {
+                print("StreamingAudioBuffer: Ring capacity full, chunk dropped")
+                return true  // Return true so caller continues synthesis
+            }
 
             // Ring enqueue
             chunkRing[ringTail] = chunk

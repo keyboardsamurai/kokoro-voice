@@ -103,7 +103,7 @@ guard os_unfair_lock_trylock(&lock) else {
 
 ```swift
 // Constants
-static let maxChunks = 1024        // Ring buffer capacity (chunks = audio + silence)
+static let maxChunks = 2048        // Ring buffer capacity (chunks = audio + silence)
 static let maxSSMLSegments = 1000  // Limit on input SSML segments (DoS protection)
 
 // In synthesis loop (AudioUnit side, not buffer):
@@ -120,7 +120,7 @@ for segment in segments {
 
 **Updated semantics:**
 - `maxSSMLSegments` (1000): Limits input SSML segments in synthesis loop (prevents pathological input)
-- `maxChunks` (1024): Ring buffer capacity (internal limit, should never be hit with maxSSMLSegments enforced)
+- `maxChunks` (2048): Ring buffer capacity (internal limit, should never be hit with maxSSMLSegments enforced)
 
 **Invariant:** With `maxSSMLSegments = 1000` and worst case 2 chunks per segment, max chunks = 2000. But oversized splitting (change #1) can increase this. Set `ringCapacity = 2048` to be safe.
 
