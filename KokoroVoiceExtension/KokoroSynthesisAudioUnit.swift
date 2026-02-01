@@ -65,6 +65,16 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     /// Whether streaming mode is enabled (validated at init)
     private var useStreamingMode = true
 
+    // MARK: - Streaming Constants
+
+    /// Maximum SSML segments to process (DoS protection for input)
+    /// Separate from buffer's maxChunks which is the internal ring buffer limit
+    private static let maxSSMLSegments = 1000
+
+    /// Maximum chunk size for oversized audio splitting (leave 10% headroom)
+    /// 9 seconds at 24kHz = 216,000 frames
+    private static let maxChunkSize = Int(StreamingAudioBuffer.maxBufferedFrames) * 9 / 10
+
     // MARK: - Legacy Mode State (Non-streaming fallback)
     // Note: Legacy variables use stateLock for thread safety (accessed from render + synthesis threads)
 
@@ -373,7 +383,16 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         into buffer: StreamingAudioBuffer
     ) async {
         do {
+            var segmentCount = 0
+
             for segment in segments {
+                // Check SSML segment limit (DoS protection)
+                segmentCount += 1
+                if segmentCount > Self.maxSSMLSegments {
+                    print("KokoroSynthesisAudioUnit: SSML segment limit (\(Self.maxSSMLSegments)) reached, truncating")
+                    break
+                }
+
                 // Check for cancellation
                 try Task.checkCancellation()
 
@@ -406,16 +425,29 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
                 )
 
                 // Validate audio samples (replace NaN/Inf with silence)
-                let validatedAudio = audio.map { sample -> Float in
+                let validated = audio.map { sample -> Float in
                     if sample.isNaN || sample.isInfinite {
                         return 0.0
                     }
                     return sample
                 }
 
-                // Enqueue audio chunk
-                let shouldContinue = await buffer.enqueue(.audio(validatedAudio))
-                if !shouldContinue { return } // Buffer was reset
+                // Split if oversized (prevents poll-wait deadlock for huge segments)
+                if validated.count > Self.maxChunkSize {
+                    // Split into multiple chunks
+                    var offset = 0
+                    while offset < validated.count {
+                        let end = min(offset + Self.maxChunkSize, validated.count)
+                        let chunk = Array(validated[offset..<end])
+                        let shouldContinue = await buffer.enqueue(.audio(chunk))
+                        if !shouldContinue { return } // Buffer was reset
+                        offset = end
+                    }
+                } else {
+                    // Normal case: enqueue as single chunk
+                    let shouldContinue = await buffer.enqueue(.audio(validated))
+                    if !shouldContinue { return } // Buffer was reset
+                }
             }
 
             buffer.markComplete()
