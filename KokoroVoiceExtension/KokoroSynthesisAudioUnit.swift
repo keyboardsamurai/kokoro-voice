@@ -48,8 +48,8 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     /// Flag indicating if the model is loaded and ready
     private var isModelReady = false
 
-    /// Pending requests queue (for when model isn't ready)
-    private var pendingRequests: [AVSpeechSynthesisProviderRequest] = []
+    /// Pending requests queue (for when model isn't ready) - backing storage
+    private var _pendingRequests: [AVSpeechSynthesisProviderRequest] = []
 
     // MARK: - Streaming Mode State
 
@@ -165,6 +165,23 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         set { withStateLock { _legacySynthesisCompletedEmpty = newValue } }
     }
 
+    // Thread-safe operations for pending requests
+    private func appendPendingRequest(_ request: AVSpeechSynthesisProviderRequest) {
+        withStateLock { _pendingRequests.append(request) }
+    }
+
+    private func takePendingRequests() -> [AVSpeechSynthesisProviderRequest] {
+        withStateLock {
+            let requests = _pendingRequests
+            _pendingRequests.removeAll()
+            return requests
+        }
+    }
+
+    private func clearPendingRequests() {
+        withStateLock { _pendingRequests.removeAll() }
+    }
+
     private func withStateLock<T>(_ body: () -> T) -> T {
         os_unfair_lock_lock(&stateLock)
         defer { os_unfair_lock_unlock(&stateLock) }
@@ -252,7 +269,10 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
 
     /// Process any requests that were queued while model was loading
     private func processPendingRequests() async {
-        for request in pendingRequests {
+        // Atomically take all pending requests to avoid race with new incoming requests
+        let requests = takePendingRequests()
+
+        for request in requests {
             if useStreamingMode {
                 let ssml = request.ssmlRepresentation
                 let voiceIdentifier = request.voice.identifier
@@ -268,7 +288,6 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
                 await performSynthesisLegacy(ssml: ssml, voiceIdentifier: voiceIdentifier)
             }
         }
-        pendingRequests.removeAll()
     }
 
     // MARK: - Voice Registration
@@ -316,7 +335,7 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         // If model isn't ready, queue the request
         guard isModelReady else {
             print("KokoroSynthesisAudioUnit: Model not ready, queueing request")
-            pendingRequests.append(speechRequest)
+            appendPendingRequest(speechRequest)
             return
         }
 
@@ -414,7 +433,7 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     public override func cancelSpeechRequest() {
         print("KokoroSynthesisAudioUnit: Cancelling speech request")
         cancelCurrentSynthesis()
-        pendingRequests.removeAll()
+        clearPendingRequests()
     }
 
     /// Cancel current synthesis (thread-safe)
