@@ -125,7 +125,7 @@ projects:
   - id: "0003"
     title: "Multi-Language Support (Romance Languages)"
     summary: "Add 36 voices: 28 English + 8 Romance (Spanish, Italian, Portuguese) with rule-based G2P"
-    status: committed
+    status: integrated
     priority: high
     files:
       spec: codev/specs/0003-multi-language-support.md
@@ -133,7 +133,7 @@ projects:
       review: codev/reviews/0003-multi-language-support.md
     dependencies: []
     tags: [features, i18n, voices]
-    notes: "PR #2 merged 2026-02-01. Pure Swift rule-based G2P, no GPL dependencies."
+    notes: "Integrated 2026-02-01. Pure Swift rule-based G2P, no GPL dependencies. All tests passing."
 ```
 
 ## Next Available Number
