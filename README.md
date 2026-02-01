@@ -216,6 +216,28 @@ See `Shared/Constants.swift` for the complete list.
 | `<p>` | ✅ | Paragraph pause |
 | `<s>` | ✅ | Sentence pause |
 
+### SSML Best Practices for Optimal Latency
+
+For the best experience with long texts, structure your SSML with natural breaks. This allows audio to start playing within 500ms regardless of total text length:
+
+- **Use `<s>` tags around sentences** - Each sentence becomes a separate chunk
+- **Use `<p>` tags around paragraphs** - Adds natural pauses between sections
+- **Avoid single segments longer than ~50 words** - Very long segments delay first audio
+
+**Example - Well-structured SSML:**
+```xml
+<speak>
+  <p>
+    <s>Welcome to the presentation.</s>
+    <s>Today we will discuss neural text-to-speech technology.</s>
+  </p>
+  <p>
+    <s>Kokoro uses advanced machine learning to generate natural-sounding speech.</s>
+    <s>The model runs entirely on-device using Apple's MLX framework.</s>
+  </p>
+</speak>
+```
+
 ## Architecture
 
 ```
