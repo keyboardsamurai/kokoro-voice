@@ -205,8 +205,8 @@ struct LanguageTests {
 
     @Test("Language raw values are BCP-47")
     func languageRawValues() {
-        #expect(Language.enUS.rawValue == "en-us")
-        #expect(Language.enGB.rawValue == "en-gb")
+        #expect(Language.enUS.rawValue == "en-US")
+        #expect(Language.enGB.rawValue == "en-GB")
         #expect(Language.spanish.rawValue == "es-ES")
         #expect(Language.italian.rawValue == "it-IT")
         #expect(Language.brazilianPortuguese.rawValue == "pt-BR")
@@ -232,19 +232,18 @@ struct PhonemeNormalizerTests {
     }
 
     @Test("Normalizer validates Spanish output")
-    func normalizerValidatesSpanishOutput() {
+    func normalizerValidatesSpanishOutput() throws {
         let processor = RomanceG2PProcessor()
-        try? processor.setLanguage(.spanish)
+        try processor.setLanguage(.spanish)
 
-        if let (phonemes, _) = try? processor.process(input: "hola mundo") {
-            let normalized = PhonemeNormalizer.normalize(phonemes)
-            #expect(PhonemeNormalizer.isValid(normalized))
-        }
+        let (phonemes, _) = try processor.process(input: "hola mundo")
+        let normalized = try PhonemeNormalizer.normalize(phonemes)
+        #expect(PhonemeNormalizer.isValid(normalized))
     }
 
     @Test("Normalizer removes length markers")
-    func normalizerRemovesLengthMarkers() {
-        let result = PhonemeNormalizer.normalize("aː eː iː")
+    func normalizerRemovesLengthMarkers() throws {
+        let result = try PhonemeNormalizer.normalize("aː eː iː")
         #expect(!result.contains("ː"))
     }
 }
