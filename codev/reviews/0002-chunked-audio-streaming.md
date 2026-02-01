@@ -90,12 +90,36 @@ Implemented chunked audio streaming for low-latency TTS playback in KokoroSynthe
 - [x] Code comments explain RT-safety constraints
 - [x] Spec traps documented in implementation
 
+## Post-Review Fixes
+
+The 3-way review (Gemini, Codex, Claude) identified two race conditions that were addressed:
+
+### 1. Legacy Variables Race Condition (be1f3ad)
+
+**Issue:** After replacing NSLock with os_unfair_lock, the legacy variables (`legacyBuffer`, `legacyFramePosition`, `legacySynthesisCompletedEmpty`) were left unprotected and accessed concurrently from render thread and synthesis queue.
+
+**Fix:**
+- Renamed to backing storage with `_` prefix
+- Added thread-safe accessors using `withStateLock`
+- Batched lock acquisitions in `renderLegacy()` for RT-safety
+- Updated `cancelCurrentSynthesis()` to clear legacy state atomically
+
+### 2. pendingRequests Race Condition (32374dd)
+
+**Issue:** `pendingRequests` array was accessed concurrently from async Task (`processPendingRequests`) and system callbacks (`synthesizeSpeechRequest`, `cancelSpeechRequest`), risking request loss or corruption.
+
+**Fix:**
+- Renamed to `_pendingRequests` (backing storage)
+- Added thread-safe operations: `appendPendingRequest()`, `takePendingRequests()`, `clearPendingRequests()`
+- `takePendingRequests()` atomically consumes and clears the queue, preventing request loss during concurrent access
+
 ## Lessons Learned
 
 1. **Swift 6 Concurrency** - Required `@Sendable` annotations and protocol conformance for closures crossing isolation boundaries
 2. **os_unfair_lock in Swift** - Works with `os_unfair_lock()` initializer; must pass as `&lock`
 3. **Ring Buffer vs Array** - Critical for O(1) dequeue; Swift Array.removeFirst() is O(n)
 4. **Bulk Operations** - `memcpy` simpler than vDSP for 1D contiguous arrays; vDSP_vclr for zeroing
+5. **Complete Synchronization Audit** - When replacing a locking mechanism, audit ALL shared state, not just the primary target
 
 ## Verification
 
