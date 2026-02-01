@@ -57,14 +57,35 @@ public enum KokoroEngineError: Error, LocalizedError {
 public enum KokoroLanguage: String, CaseIterable {
     case enUS = "en-US"
     case enGB = "en-GB"
+    case spanish = "es-ES"
+    case italian = "it-IT"
+    case brazilianPortuguese = "pt-BR"
 
-    /// Get the language from a voice ID
+    /// Get the language from a voice ID based on prefix
+    /// Voice ID prefixes:
+    /// - a: American English (af_, am_)
+    /// - b: British English (bf_, bm_)
+    /// - e: Spanish (ef_, em_)
+    /// - i: Italian (if_, im_)
+    /// - p: Portuguese (pf_, pm_)
     public static func from(voiceId: String) -> KokoroLanguage {
-        // British voices start with 'b'
-        if voiceId.hasPrefix("b") {
-            return .enGB
+        guard voiceId.count >= 2 else { return .enUS }
+        let prefix = String(voiceId.prefix(1))
+
+        switch prefix {
+        case "b": return .enGB
+        case "e": return .spanish
+        case "i": return .italian
+        case "p": return .brazilianPortuguese
+        default: return .enUS  // 'a' and unknown default to en-US
         }
-        return .enUS
+    }
+
+    /// Get the language from a language string
+    public static func from(languageString: String) -> KokoroLanguage? {
+        return SupportedLanguage(rawValue: languageString).flatMap { supported in
+            KokoroLanguage(rawValue: supported.rawValue)
+        }
     }
 
     #if canImport(KokoroSwift)
@@ -75,6 +96,12 @@ public enum KokoroLanguage: String, CaseIterable {
             return .enUS
         case .enGB:
             return .enGB
+        case .spanish:
+            return .spanish
+        case .italian:
+            return .italian
+        case .brazilianPortuguese:
+            return .brazilianPortuguese
         }
     }
     #endif
@@ -134,9 +161,10 @@ public actor KokoroEngine {
 
         #if canImport(KokoroSwift)
         do {
-            // Initialize the TTS engine with the model file and Misaki G2P processor
+            // Initialize the TTS engine with the model file and composite G2P processor
+            // Composite G2P routes English to Misaki, Romance languages to rule-based G2P
             let modelFile = modelPath.appendingPathComponent("kokoro-v1_0.safetensors")
-            tts = try KokoroTTS(modelPath: modelFile, g2p: .misaki)
+            tts = try KokoroTTS(modelPath: modelFile, g2p: .composite)
 
             // Preload voice embeddings from voices.npz archive
             try await loadVoiceEmbeddings(from: modelPath)
