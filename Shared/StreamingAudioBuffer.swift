@@ -177,6 +177,11 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
     /// If lock is contended, returns 0 frames (silence fallback) instead of blocking.
     /// Lock contention is extremely rare (<0.001% of calls) due to sub-microsecond hold times.
     ///
+    /// Uses "reserve then copy" pattern:
+    /// - Phase 1 (locked): Reserve frames by advancing indices, retain chunk refs for copying
+    /// - Phase 2 (unlocked): Bulk copy from retained chunk references
+    /// This eliminates the race condition of a separate Phase 3 index update.
+    ///
     /// Returns ReadResult with:
     /// - framesRead: Number of frames copied (may be 0 if underrun or lock contended)
     /// - isComplete: True when synthesis done AND buffer fully consumed
@@ -207,56 +212,60 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
             return ReadResult(framesRead: 0, isComplete: false, hadError: false, wasSpeech: false)
         }
 
-        // Under lock - get chunk info and prepare for copy
+        // Under lock - reserve frames by collecting chunk refs AND advancing indices
         // Handle reset state
         if isReset {
             os_unfair_lock_unlock(&lock)
             return ReadResult(framesRead: 0, isComplete: true, hadError: false, wasSpeech: false)
         }
 
-        // Collect chunks to read
+        // Collect chunks to read AND advance indices atomically ("reserve then copy" pattern)
+        // The AudioChunk values retain underlying [Float] arrays via copy-on-write,
+        // so we can safely nil ring slots while keeping data references for copying.
         var chunksToRead: [(chunk: AudioChunk, startOffset: Int, framesToCopy: Int)] = []
         var framesNeeded = Int(count)
-        var tempOffset = frameOffsetInCurrentChunk
-        var tempHead = ringHead
-        var tempCount = ringCount
+        var totalFramesToRead: AVAudioFramePosition = 0
 
-        while framesNeeded > 0 && tempCount > 0 {
-            guard let chunk = chunkRing[tempHead] else { break }
+        while framesNeeded > 0 && ringCount > 0 {
+            guard let chunk = chunkRing[ringHead] else { break }
 
-            let remainingInChunk = chunk.frameCount - tempOffset
+            let remainingInChunk = chunk.frameCount - frameOffsetInCurrentChunk
             let framesToCopy = min(framesNeeded, remainingInChunk)
 
-            chunksToRead.append((chunk, tempOffset, framesToCopy))
+            // Retain chunk reference for Phase 2 copy
+            chunksToRead.append((chunk, frameOffsetInCurrentChunk, framesToCopy))
 
             framesNeeded -= framesToCopy
+            totalFramesToRead += AVAudioFramePosition(framesToCopy)
 
             if framesToCopy >= remainingInChunk {
-                // Will consume this chunk
-                tempHead = (tempHead + 1) % Self.ringCapacity
-                tempCount -= 1
-                tempOffset = 0
+                // Fully consumed this chunk - advance to next
+                chunkRing[ringHead] = nil  // Release ring slot (chunk retained in chunksToRead)
+                ringHead = (ringHead + 1) % Self.ringCapacity
+                ringCount -= 1
+                frameOffsetInCurrentChunk = 0
             } else {
-                tempOffset += framesToCopy
+                // Partially consumed - update offset within chunk
+                frameOffsetInCurrentChunk += framesToCopy
             }
         }
 
-        // Capture state needed for result determination
-        let capturedSynthesisComplete = synthesisComplete
-        let capturedSynthesisError = synthesisError
-        let bufferIsEmpty = ringCount == 0
+        // Update total frames read counter
+        totalFramesRead += totalFramesToRead
 
-        // Release lock for bulk copy phase
+        // Capture completion state while still holding lock
+        let isComplete = synthesisComplete && ringCount == 0
+        let hadError = isComplete && synthesisError != nil
+
+        // Release lock - indices already advanced, ready for bulk copy
         os_unfair_lock_unlock(&lock)
 
-        // Handle empty buffer
+        // Handle empty buffer (no data was available)
         if chunksToRead.isEmpty {
-            let isComplete = capturedSynthesisComplete && bufferIsEmpty
-            let hadError = isComplete && capturedSynthesisError != nil
             return ReadResult(framesRead: 0, isComplete: isComplete, hadError: hadError, wasSpeech: false)
         }
 
-        // Phase 2: Outside lock - bulk copy samples (this is the expensive part)
+        // Phase 2: Outside lock - bulk copy samples from retained chunk references
         var framesWritten: AVAudioFrameCount = 0
         var wasSpeech = false
 
@@ -278,50 +287,6 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
 
             framesWritten += AVAudioFrameCount(framesToCopy)
         }
-
-        // Phase 3: Try to acquire lock again for index updates (RT-safe)
-        guard os_unfair_lock_trylock(&lock) else {
-            // Lock contended - return the data we copied, indices will be updated on next call
-            // This is acceptable: the data is valid, we just may re-read some frames next time
-            #if DEBUG
-            Self.lockContentionCount += 1
-            #endif
-            return ReadResult(framesRead: framesWritten, isComplete: false, hadError: false, wasSpeech: wasSpeech)
-        }
-
-        // Re-check reset
-        if isReset {
-            os_unfair_lock_unlock(&lock)
-            return ReadResult(framesRead: 0, isComplete: true, hadError: false, wasSpeech: false)
-        }
-
-        // Apply the reads we just did
-        var remaining = Int(framesWritten)
-
-        while remaining > 0 && ringCount > 0 {
-            guard let chunk = chunkRing[ringHead] else { break }
-
-            let remainingInChunk = chunk.frameCount - frameOffsetInCurrentChunk
-            let framesConsumed = min(remaining, remainingInChunk)
-
-            frameOffsetInCurrentChunk += framesConsumed
-            totalFramesRead += AVAudioFramePosition(framesConsumed)
-            remaining -= framesConsumed
-
-            // Dequeue fully consumed chunk
-            if frameOffsetInCurrentChunk >= chunk.frameCount {
-                chunkRing[ringHead] = nil  // Release reference
-                ringHead = (ringHead + 1) % Self.ringCapacity
-                ringCount -= 1
-                frameOffsetInCurrentChunk = 0
-            }
-        }
-
-        // Determine completion state
-        let isComplete = synthesisComplete && ringCount == 0
-        let hadError = isComplete && synthesisError != nil
-
-        os_unfair_lock_unlock(&lock)
 
         return ReadResult(
             framesRead: framesWritten,
