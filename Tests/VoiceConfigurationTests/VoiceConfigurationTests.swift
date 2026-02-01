@@ -320,6 +320,24 @@ final class VoiceConfigurationTests: XCTestCase {
         XCTAssertEqual(SupportedLanguage.match(bcp47: "en"), .americanEnglish)
     }
 
+    func testSupportedLanguageMatchCaseInsensitive() {
+        // Lowercase variants
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en-us"), .americanEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en-gb"), .britishEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "es-es"), .spanish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "it-it"), .italian)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "pt-br"), .brazilianPortuguese)
+
+        // Underscore variants (locale format)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en_US"), .americanEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en_gb"), .britishEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "es_ES"), .spanish)
+
+        // Mixed case
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "EN-us"), .americanEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "Es-eS"), .spanish)
+    }
+
     func testSupportedLanguageMatchUnsupported() {
         // Unsupported languages should return nil
         XCTAssertNil(SupportedLanguage.match(bcp47: "ja-JP"))

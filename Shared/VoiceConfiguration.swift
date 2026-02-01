@@ -296,9 +296,25 @@ extension VoiceConfiguration {
     }
 
     /// Get the Kokoro language enum value (for engine)
+    /// Uses the language property with ID-prefix fallback for safety
     public var kokoroLanguageCode: String {
-        // Use the language property directly since it's always set
-        language
+        // Validate the language property against known values
+        if let lang = SupportedLanguage(rawValue: language) {
+            return lang.rawValue
+        }
+
+        // Fallback: infer from voice ID prefix if language is invalid/empty
+        let prefix = String(id.prefix(2))
+        switch prefix {
+        case "af", "am": return "en-US"
+        case "bf", "bm": return "en-GB"
+        case "ef", "em": return "es-ES"
+        case "if", "im": return "it-IT"
+        case "pf", "pm": return "pt-BR"
+        default:
+            // Last resort: return whatever was stored
+            return language.isEmpty ? "en-US" : language
+        }
     }
 
     /// Get the supported language enum for this voice

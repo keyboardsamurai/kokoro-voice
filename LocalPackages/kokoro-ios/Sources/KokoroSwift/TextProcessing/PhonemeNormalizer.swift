@@ -8,6 +8,19 @@
 
 import Foundation
 
+/// Errors that can occur during phoneme normalization.
+public enum PhonemeNormalizationError: Error, CustomStringConvertible {
+    /// The phoneme string contains symbols not in Kokoro's vocabulary.
+    case unrecognizedPhonemes(Set<String>)
+
+    public var description: String {
+        switch self {
+        case .unrecognizedPhonemes(let phonemes):
+            return "Unrecognized phonemes: \(phonemes.sorted().joined(separator: ", "))"
+        }
+    }
+}
+
 /// Normalizes IPA phonemes to Kokoro's vocabulary.
 /// Kokoro was trained with espeak-ng IPA phonemes, so rule-based
 /// G2P output must be mapped to compatible symbols.
@@ -66,12 +79,19 @@ struct PhonemeNormalizer {
     /// Normalize a phoneme string to Kokoro vocabulary.
     /// - Parameter phonemes: Raw IPA phoneme string from G2P
     /// - Returns: Normalized phoneme string compatible with Kokoro
-    static func normalize(_ phonemes: String) -> String {
+    /// - Throws: PhonemeNormalizationError.unrecognizedPhonemes if any phonemes are not in vocabulary
+    static func normalize(_ phonemes: String) throws -> String {
         var result = phonemes
 
         // Apply phoneme mappings
         for (from, replacement) in phonemeMapping {
             result = result.replacingOccurrences(of: from, with: replacement)
+        }
+
+        // Validate that all phonemes are recognized
+        let unrecognized = findUnrecognizedPhonemes(result)
+        if !unrecognized.isEmpty {
+            throw PhonemeNormalizationError.unrecognizedPhonemes(unrecognized)
         }
 
         return result

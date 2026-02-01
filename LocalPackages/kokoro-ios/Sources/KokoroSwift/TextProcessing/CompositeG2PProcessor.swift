@@ -67,8 +67,8 @@ final class CompositeG2PProcessor: G2PProcessor {
                 throw G2PProcessorError.processorNotInitialized
             }
             let (phonemes, tokens) = try processor.process(input: input)
-            // Normalize phonemes to Kokoro vocabulary
-            let normalized = PhonemeNormalizer.normalize(phonemes)
+            // Normalize phonemes to Kokoro vocabulary (throws on unrecognized phonemes)
+            let normalized = try PhonemeNormalizer.normalize(phonemes)
             return (normalized, tokens)
 
         case .none:

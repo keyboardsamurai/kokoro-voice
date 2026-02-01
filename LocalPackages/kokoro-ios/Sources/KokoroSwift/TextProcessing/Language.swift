@@ -9,9 +9,9 @@ public enum Language: String, CaseIterable {
   /// No language specified or language-independent processing.
   case none = ""
   /// US English (American English).
-  case enUS = "en-us"
+  case enUS = "en-US"
   /// GB English (British English).
-  case enGB = "en-gb"
+  case enGB = "en-GB"
   /// Spanish (Spain).
   case spanish = "es-ES"
   /// Italian.

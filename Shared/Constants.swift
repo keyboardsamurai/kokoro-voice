@@ -28,15 +28,30 @@ public enum SupportedLanguage: String, CaseIterable, Sendable {
 
     /// Match BCP-47 language code to supported language
     /// Handles variants like es-MX → es-ES, pt-PT → pt-BR
+    /// Normalizes case before matching (handles "en-gb", "en-GB", "en_GB" variants)
     public static func match(bcp47 code: String) -> SupportedLanguage? {
-        // Exact match first
-        if let exact = SupportedLanguage(rawValue: code) {
+        // Normalize: replace underscores with hyphens, then format as "xx-XX"
+        let normalized = code.replacingOccurrences(of: "_", with: "-")
+        let parts = normalized.split(separator: "-")
+
+        let normalizedCode: String
+        if parts.count >= 2 {
+            // Format as lowercase-UPPERCASE (e.g., "en-US", "es-ES")
+            normalizedCode = "\(parts[0].lowercased())-\(parts[1].uppercased())"
+        } else if parts.count == 1 {
+            normalizedCode = parts[0].lowercased()
+        } else {
+            normalizedCode = code
+        }
+
+        // Exact match first (after normalization)
+        if let exact = SupportedLanguage(rawValue: normalizedCode) {
             return exact
         }
 
         // Base language fallback
-        let base = code.split(separator: "-").first.map(String.init) ?? code
-        switch base.lowercased() {
+        let base = parts.first.map { String($0).lowercased() } ?? normalizedCode
+        switch base {
         case "en": return .americanEnglish  // en-AU, en-CA, etc.
         case "es": return .spanish          // es-MX, es-AR, etc.
         case "it": return .italian
