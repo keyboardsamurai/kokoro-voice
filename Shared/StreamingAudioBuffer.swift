@@ -9,6 +9,10 @@ import os
 import AVFoundation
 import Accelerate
 
+#if DEBUG
+import Darwin.libkern.OSAtomic
+#endif
+
 /// Thread-safe streaming audio buffer for real-time audio synthesis
 ///
 /// Design principles:
@@ -70,11 +74,30 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
 
     #if DEBUG
     /// Count of times trylock failed due to contention (DEBUG only)
-    /// Note: nonisolated(unsafe) is acceptable here as these are debug-only counters
-    /// that may have benign races but won't cause correctness issues
-    public nonisolated(unsafe) static var lockContentionCount = 0
+    /// Uses OSAtomicIncrement64 for thread-safe incrementing
+    /// nonisolated(unsafe) is acceptable because atomic ops provide synchronization
+    private nonisolated(unsafe) static var _lockContentionCount: Int64 = 0
+    public static var lockContentionCount: Int {
+        get { Int(OSAtomicAdd64(0, &_lockContentionCount)) }
+        set { _lockContentionCount = Int64(newValue) }
+    }
+
     /// Total number of readFrames calls (DEBUG only)
-    public nonisolated(unsafe) static var totalReadCalls = 0
+    private nonisolated(unsafe) static var _totalReadCalls: Int64 = 0
+    public static var totalReadCalls: Int {
+        get { Int(OSAtomicAdd64(0, &_totalReadCalls)) }
+        set { _totalReadCalls = Int64(newValue) }
+    }
+
+    /// Thread-safe increment for contention counter
+    private static func incrementContentionCount() {
+        OSAtomicIncrement64(&_lockContentionCount)
+    }
+
+    /// Thread-safe increment for total read calls counter
+    private static func incrementTotalReadCalls() {
+        OSAtomicIncrement64(&_totalReadCalls)
+    }
     #endif
 
     // MARK: - Properties
@@ -125,12 +148,15 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
             return true  // Don't stop synthesis, just drop excess
         }
 
-        // Poll for buffer space based on frame count
+        // Poll for buffer space based on frame count (accounting for incoming chunk)
+        let incomingFrames = AVAudioFramePosition(chunk.frameCount)
         while true {
             let (shouldWait, resetFlag) = withLock {
                 if isReset { return (false, true) }
                 let buffered = totalFramesEnqueued - totalFramesRead
-                return (buffered >= Self.maxBufferedFrames, false)
+                // Check if adding this chunk would exceed max buffer
+                // This prevents overshooting when enqueuing large chunks
+                return (buffered + incomingFrames > Self.maxBufferedFrames, false)
             }
 
             if resetFlag { return false }
@@ -199,7 +225,7 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
         count: AVAudioFrameCount
     ) -> ReadResult {
         #if DEBUG
-        Self.totalReadCalls += 1
+        Self.incrementTotalReadCalls()
         #endif
 
         // Phase 1: Try to acquire lock without blocking (RT-safe)
@@ -207,7 +233,7 @@ public final class StreamingAudioBuffer: @unchecked Sendable {
             // Lock contended - return silence instead of blocking
             // This is extremely rare (<0.001% of calls) but guarantees RT safety
             #if DEBUG
-            Self.lockContentionCount += 1
+            Self.incrementContentionCount()
             #endif
             return ReadResult(framesRead: 0, isComplete: false, hadError: false, wasSpeech: false)
         }
