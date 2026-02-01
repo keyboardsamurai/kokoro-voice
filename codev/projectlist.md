@@ -112,15 +112,15 @@ projects:
   - id: "0002"
     title: "Chunked Audio Streaming"
     summary: "Stream audio progressively so playback starts <500ms regardless of text length"
-    status: implementing
+    status: committed
     priority: high
     files:
       spec: codev/specs/0002-chunked-audio-streaming.md
       plan: codev/plans/0002-chunked-audio-streaming.md
-      review: null
+      review: codev/reviews/0002-chunked-audio-streaming.md
     dependencies: []
     tags: [ux, performance, audio]
-    notes: "Spec and plan approved 2025-01-31. Reviewed by Gemini (APPROVE) and Codex (APPROVE with minor notes)."
+    notes: "PR #1 merged 2026-02-01. O(1) ring buffer, RT-safe locking, 21 tests. Race conditions fixed in review."
 
   - id: "0003"
     title: "Multi-Language Support (Romance Languages)"
