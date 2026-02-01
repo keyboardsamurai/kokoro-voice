@@ -285,4 +285,163 @@ final class VoiceConfigurationTests: XCTestCase {
 
         manager.clearAll()
     }
+
+    // MARK: - Multi-Language Support Tests
+
+    func testSupportedLanguageDefaultVoices() {
+        XCTAssertEqual(SupportedLanguage.americanEnglish.defaultVoiceId, "af_heart")
+        XCTAssertEqual(SupportedLanguage.britishEnglish.defaultVoiceId, "bf_emma")
+        XCTAssertEqual(SupportedLanguage.spanish.defaultVoiceId, "ef_dora")
+        XCTAssertEqual(SupportedLanguage.italian.defaultVoiceId, "if_sara")
+        XCTAssertEqual(SupportedLanguage.brazilianPortuguese.defaultVoiceId, "pf_dora")
+    }
+
+    func testSupportedLanguageMatchExact() {
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en-US"), .americanEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en-GB"), .britishEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "es-ES"), .spanish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "it-IT"), .italian)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "pt-BR"), .brazilianPortuguese)
+    }
+
+    func testSupportedLanguageMatchFallback() {
+        // Spanish variants should fall back to es-ES
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "es-MX"), .spanish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "es-AR"), .spanish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "es"), .spanish)
+
+        // Portuguese variants should fall back to pt-BR
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "pt-PT"), .brazilianPortuguese)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "pt"), .brazilianPortuguese)
+
+        // English variants should fall back to en-US
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en-AU"), .americanEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en-CA"), .americanEnglish)
+        XCTAssertEqual(SupportedLanguage.match(bcp47: "en"), .americanEnglish)
+    }
+
+    func testSupportedLanguageMatchUnsupported() {
+        // Unsupported languages should return nil
+        XCTAssertNil(SupportedLanguage.match(bcp47: "ja-JP"))
+        XCTAssertNil(SupportedLanguage.match(bcp47: "zh-CN"))
+        XCTAssertNil(SupportedLanguage.match(bcp47: "fr-FR"))
+        XCTAssertNil(SupportedLanguage.match(bcp47: "de-DE"))
+    }
+
+    // MARK: - Voice Definition Tests
+
+    func testAllVoiceDefinitionsAre36() {
+        XCTAssertEqual(Constants.availableVoices.count, 36)
+    }
+
+    func testVoiceDefinitionsHaveUniqueIds() {
+        let ids = Constants.availableVoices.map { $0.id }
+        let uniqueIds = Set(ids)
+        XCTAssertEqual(ids.count, uniqueIds.count, "Duplicate voice IDs found")
+    }
+
+    func testEnglishVoiceCount() {
+        let enUSVoices = Constants.availableVoices.filter { $0.language == "en-US" }
+        let enGBVoices = Constants.availableVoices.filter { $0.language == "en-GB" }
+
+        XCTAssertEqual(enUSVoices.count, 20, "Expected 20 en-US voices")
+        XCTAssertEqual(enGBVoices.count, 8, "Expected 8 en-GB voices")
+    }
+
+    func testRomanceVoiceCount() {
+        let spanishVoices = Constants.availableVoices.filter { $0.language == "es-ES" }
+        let italianVoices = Constants.availableVoices.filter { $0.language == "it-IT" }
+        let portugueseVoices = Constants.availableVoices.filter { $0.language == "pt-BR" }
+
+        XCTAssertEqual(spanishVoices.count, 3, "Expected 3 Spanish voices")
+        XCTAssertEqual(italianVoices.count, 2, "Expected 2 Italian voices")
+        XCTAssertEqual(portugueseVoices.count, 3, "Expected 3 Portuguese voices")
+    }
+
+    func testDefaultEnabledVoicesAreOnePerLanguage() {
+        let defaultIds = Constants.defaultEnabledVoiceIds
+        XCTAssertEqual(defaultIds.count, 5, "Expected 5 default voices (one per language)")
+
+        // Verify each language has exactly one default
+        for language in SupportedLanguage.allCases {
+            let defaultForLanguage = defaultIds.filter { voiceId in
+                Constants.voiceDefinition(forId: voiceId)?.language == language.rawValue
+            }
+            XCTAssertEqual(defaultForLanguage.count, 1, "Expected exactly 1 default for \(language.rawValue)")
+        }
+    }
+
+    func testVoiceConfigurationLanguageChecks() {
+        // Spanish voice
+        let spanishConfig = VoiceConfiguration(
+            id: "ef_dora",
+            name: "Dora",
+            language: "es-ES",
+            gender: .female,
+            quality: .b,
+            isEnabled: true
+        )
+        XCTAssertTrue(spanishConfig.isSpanish)
+        XCTAssertTrue(spanishConfig.isRomanceLanguage)
+        XCTAssertFalse(spanishConfig.isAmericanEnglish)
+        XCTAssertFalse(spanishConfig.isBritishEnglish)
+
+        // Italian voice
+        let italianConfig = VoiceConfiguration(
+            id: "if_sara",
+            name: "Sara",
+            language: "it-IT",
+            gender: .female,
+            quality: .b,
+            isEnabled: true
+        )
+        XCTAssertTrue(italianConfig.isItalian)
+        XCTAssertTrue(italianConfig.isRomanceLanguage)
+
+        // Portuguese voice
+        let portugueseConfig = VoiceConfiguration(
+            id: "pf_dora",
+            name: "Dora",
+            language: "pt-BR",
+            gender: .female,
+            quality: .b,
+            isEnabled: true
+        )
+        XCTAssertTrue(portugueseConfig.isBrazilianPortuguese)
+        XCTAssertTrue(portugueseConfig.isRomanceLanguage)
+
+        // English voice should not be Romance
+        let englishConfig = VoiceConfiguration(
+            id: "af_heart",
+            name: "Heart",
+            language: "en-US",
+            gender: .female,
+            quality: .a,
+            isEnabled: true
+        )
+        XCTAssertFalse(englishConfig.isRomanceLanguage)
+        XCTAssertTrue(englishConfig.isAmericanEnglish)
+    }
+
+    func testVoiceConfigurationKokoroLanguageCode() {
+        let spanishConfig = VoiceConfiguration(
+            id: "ef_dora",
+            name: "Dora",
+            language: "es-ES",
+            gender: .female,
+            quality: .b,
+            isEnabled: true
+        )
+        XCTAssertEqual(spanishConfig.kokoroLanguageCode, "es-ES")
+
+        let englishConfig = VoiceConfiguration(
+            id: "af_heart",
+            name: "Heart",
+            language: "en-US",
+            gender: .female,
+            quality: .a,
+            isEnabled: true
+        )
+        XCTAssertEqual(englishConfig.kokoroLanguageCode, "en-US")
+    }
 }
