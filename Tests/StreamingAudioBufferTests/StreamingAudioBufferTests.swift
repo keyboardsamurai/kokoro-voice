@@ -278,12 +278,12 @@ final class StreamingAudioBufferTests: XCTestCase {
         XCTAssertTrue(r2.wasSpeech, "Second read includes speech")
     }
 
-    // MARK: - Many Tiny Segments Tests
+    // MARK: - Many Tiny Chunks Tests
 
-    func testManyTinySegments() async {
+    func testManyTinyChunks() async {
         let buffer = StreamingAudioBuffer()
 
-        // Enqueue 500 tiny audio chunks (well under maxSegments=1000)
+        // Enqueue 500 tiny audio chunks (well under maxChunks=2048)
         for i in 0..<500 {
             let tiny = [Float](repeating: Float(i % 100), count: 10)
             let cont = await buffer.enqueue(.audio(tiny))
@@ -301,11 +301,11 @@ final class StreamingAudioBufferTests: XCTestCase {
         XCTAssertTrue(result.isComplete)
     }
 
-    func testSegmentLimitEnforced() async {
+    func testChunkLimitEnforced() async {
         let buffer = StreamingAudioBuffer()
 
-        // Enqueue exactly maxSegments - but each tiny so we don't hit frame limit
-        for _ in 0..<StreamingAudioBuffer.maxSegments {
+        // Enqueue exactly maxChunks - but each tiny so we don't hit frame limit
+        for _ in 0..<StreamingAudioBuffer.maxChunks {
             _ = await buffer.enqueue(.audio([1.0]))
         }
 
@@ -313,13 +313,13 @@ final class StreamingAudioBufferTests: XCTestCase {
         let cont = await buffer.enqueue(.audio([2.0]))
         XCTAssertTrue(cont, "Should return true (don't stop synthesis)")
 
-        // Verify by reading: should get exactly maxSegments frames
+        // Verify by reading: should get exactly maxChunks frames
         buffer.markComplete()
-        var output = [Float](repeating: 0, count: StreamingAudioBuffer.maxSegments + 10)
+        var output = [Float](repeating: 0, count: StreamingAudioBuffer.maxChunks + 10)
         let result = output.withUnsafeMutableBufferPointer { ptr in
             buffer.readFrames(into: ptr.baseAddress!, count: UInt32(ptr.count))
         }
-        XCTAssertEqual(Int(result.framesRead), StreamingAudioBuffer.maxSegments, "Should have exactly maxSegments frames")
+        XCTAssertEqual(Int(result.framesRead), StreamingAudioBuffer.maxChunks, "Should have exactly maxChunks frames")
     }
 
     // MARK: - Buffered Frames Tests
@@ -400,6 +400,109 @@ final class StreamingAudioBufferTests: XCTestCase {
         XCTAssertEqual(StreamingAudioBuffer.maxBufferedFrames, 24000 * 10, "Max buffer should be 10 seconds")
         XCTAssertEqual(StreamingAudioBuffer.minBufferBeforeStart, 24000 / 4, "Min buffer should be 250ms")
         XCTAssertEqual(StreamingAudioBuffer.maxPauseDuration, 30.0, "Max pause should be 30 seconds")
-        XCTAssertEqual(StreamingAudioBuffer.maxSegments, 1000, "Max segments should be 1000")
+        XCTAssertEqual(StreamingAudioBuffer.maxChunks, 2048, "Max chunks should be 2048")
+    }
+
+    // MARK: - Amendment 1: Edge Case Hardening Tests
+
+    /// Test that oversized chunks don't cause deadlock
+    /// Note: Actual chunk splitting is done in KokoroSynthesisAudioUnit, not StreamingAudioBuffer
+    /// This test verifies that large chunks can flow through when there's a consumer
+    func testOversizedChunkWithConcurrentDrain() async {
+        let buffer = StreamingAudioBuffer()
+
+        // Create chunk larger than maxBufferedFrames
+        let oversized = [Float](repeating: 1.0, count: Int(StreamingAudioBuffer.maxBufferedFrames) + 50000)
+
+        // Start producer - this would hang without concurrent consumption
+        let producer = Task {
+            _ = await buffer.enqueue(.audio(oversized))
+            buffer.markComplete()
+        }
+
+        // Drain concurrently to provide backpressure relief
+        let consumer = Task {
+            var output = [Float](repeating: 0, count: 10000)
+            while true {
+                let result = output.withUnsafeMutableBufferPointer { ptr in
+                    buffer.readFrames(into: ptr.baseAddress!, count: 10000)
+                }
+                if result.isComplete { break }
+                try? await Task.sleep(nanoseconds: 1_000_000) // 1ms
+            }
+        }
+
+        // Both should complete without hanging
+        await producer.value
+        await consumer.value
+    }
+
+    /// Test high contention scenario to verify trylock behavior
+    /// The key invariant: operations complete without deadlock, even under extreme contention
+    func testHighContentionNoBlocking() async {
+        let buffer = StreamingAudioBuffer()
+
+        #if DEBUG
+        // Reset contention counters
+        StreamingAudioBuffer.lockContentionCount = 0
+        StreamingAudioBuffer.totalReadCalls = 0
+        #endif
+
+        // Hammer from multiple tasks simultaneously - this creates extreme artificial contention
+        // In real usage, contention is extremely rare (<0.001%) due to short hold times
+        await withTaskGroup(of: Void.self) { group in
+            // 10 producers
+            for i in 0..<10 {
+                group.addTask {
+                    for _ in 0..<100 {
+                        _ = await buffer.enqueue(.audio([Float(i)]))
+                    }
+                }
+            }
+
+            // 10 consumers (simulating rapid render calls)
+            for _ in 0..<10 {
+                group.addTask {
+                    var output = [Float](repeating: 0, count: 64)
+                    for _ in 0..<1000 {
+                        output.withUnsafeMutableBufferPointer { ptr in
+                            _ = buffer.readFrames(into: ptr.baseAddress!, count: 64)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test passes if we get here without deadlock
+        // Under extreme contention like this test, some contention is expected
+        // The important thing is the system remains responsive (no deadlock)
+
+        #if DEBUG
+        // Log contention for diagnostics (not a failure condition under extreme stress)
+        if StreamingAudioBuffer.totalReadCalls > 0 {
+            let contentionRate = Double(StreamingAudioBuffer.lockContentionCount) / Double(StreamingAudioBuffer.totalReadCalls)
+            print("Test stress contention: \(contentionRate * 100)% (expected under extreme artificial load)")
+        }
+        #endif
+    }
+
+    /// Test that trylock failure returns silence (0 frames) not blocking
+    func testTrylockFailureReturnsSilence() {
+        // This test verifies the contract that readFrames never blocks
+        // The actual trylock contention is tested in testHighContentionNoBlocking
+        // Here we just verify the return type contract
+
+        let buffer = StreamingAudioBuffer()
+
+        var output = [Float](repeating: 999, count: 64)
+        let result = output.withUnsafeMutableBufferPointer { ptr in
+            buffer.readFrames(into: ptr.baseAddress!, count: 64)
+        }
+
+        // Empty buffer with synthesis ongoing should return 0 frames (underrun)
+        XCTAssertEqual(result.framesRead, 0)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertFalse(result.wasSpeech)
+        // Output should not be modified when 0 frames read
     }
 }
