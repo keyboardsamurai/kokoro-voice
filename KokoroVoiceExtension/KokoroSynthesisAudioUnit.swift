@@ -66,15 +66,16 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     private var useStreamingMode = true
 
     // MARK: - Legacy Mode State (Non-streaming fallback)
+    // Note: Legacy variables use stateLock for thread safety (accessed from render + synthesis threads)
 
-    /// Legacy: Current audio buffer containing synthesized speech
-    private var legacyBuffer: AVAudioPCMBuffer?
+    /// Legacy: Current audio buffer containing synthesized speech (backing storage)
+    private var _legacyBuffer: AVAudioPCMBuffer?
 
-    /// Legacy: Current position in the audio buffer (in frames)
-    private var legacyFramePosition: AVAudioFramePosition = 0
+    /// Legacy: Current position in the audio buffer (backing storage)
+    private var _legacyFramePosition: AVAudioFramePosition = 0
 
-    /// Legacy: Flag indicating synthesis completed with empty result
-    private var legacySynthesisCompletedEmpty = false
+    /// Legacy: Flag indicating synthesis completed with empty result (backing storage)
+    private var _legacySynthesisCompletedEmpty = false
 
     // MARK: - TTFA Tracking (DEBUG only)
 
@@ -146,6 +147,22 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     private var currentSynthesisTask: Task<Void, Never>? {
         get { withStateLock { _currentSynthesisTask } }
         set { withStateLock { _currentSynthesisTask = newValue } }
+    }
+
+    // Thread-safe accessors for legacy state
+    private var legacyBuffer: AVAudioPCMBuffer? {
+        get { withStateLock { _legacyBuffer } }
+        set { withStateLock { _legacyBuffer = newValue } }
+    }
+
+    private var legacyFramePosition: AVAudioFramePosition {
+        get { withStateLock { _legacyFramePosition } }
+        set { withStateLock { _legacyFramePosition = newValue } }
+    }
+
+    private var legacySynthesisCompletedEmpty: Bool {
+        get { withStateLock { _legacySynthesisCompletedEmpty } }
+        set { withStateLock { _legacySynthesisCompletedEmpty = newValue } }
     }
 
     private func withStateLock<T>(_ body: () -> T) -> T {
@@ -402,12 +419,16 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
 
     /// Cancel current synthesis (thread-safe)
     private func cancelCurrentSynthesis() {
-        // Get current task and buffer atomically
+        // Get current task/buffer and clear all state atomically
         let (task, buffer) = withStateLock { () -> (Task<Void, Never>?, StreamingAudioBuffer?) in
             let t = _currentSynthesisTask
             let b = _activeStreamingBuffer
             _currentSynthesisTask = nil
             _activeStreamingBuffer = nil
+            // Also clear legacy state atomically
+            _legacyBuffer = nil
+            _legacyFramePosition = 0
+            _legacySynthesisCompletedEmpty = false
             return (t, b)
         }
 
@@ -415,10 +436,6 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         task?.cancel()
         buffer?.reset()
 
-        // Also clear legacy state
-        legacyBuffer = nil
-        legacyFramePosition = 0
-        legacySynthesisCompletedEmpty = false
         currentRequest = nil
     }
 
@@ -502,22 +519,28 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     }
 
     /// Render using legacy buffer (non-streaming fallback)
+    /// Note: Batches lock acquisitions to minimize RT thread contention
     private func renderLegacy(
         output: UnsafeMutablePointer<Float32>,
         frameCount: AVAudioFrameCount,
         actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>
     ) -> OSStatus {
+        // Phase 1: Read all state in single lock acquisition
+        let (buffer, framePos, completedEmpty) = withStateLock {
+            (_legacyBuffer, _legacyFramePosition, _legacySynthesisCompletedEmpty)
+        }
+
         // Check if synthesis completed with empty result
-        if legacySynthesisCompletedEmpty {
+        if completedEmpty {
             vDSP_vclr(output, 1, vDSP_Length(frameCount))
             actionFlags.pointee = .offlineUnitRenderAction_Complete
-            legacySynthesisCompletedEmpty = false
+            withStateLock { _legacySynthesisCompletedEmpty = false }
             print("KokoroSynthesisAudioUnit: Empty synthesis complete (legacy)")
             return noErr
         }
 
         // Check if we have audio to output
-        guard let buffer = legacyBuffer,
+        guard let buffer = buffer,
               let sourceChannelData = buffer.floatChannelData?[0] else {
             // No audio ready - output silence
             vDSP_vclr(output, 1, vDSP_Length(frameCount))
@@ -527,14 +550,13 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         let bufferLength = AVAudioFramePosition(buffer.frameLength)
 
         // Calculate frames to copy
-        let framesRemaining = bufferLength - legacyFramePosition
+        let framesRemaining = bufferLength - framePos
         let framesToCopy = min(AVAudioFramePosition(frameCount), framesRemaining)
 
+        // Phase 2: Bulk copy OUTSIDE the lock (RT-safe)
         if framesToCopy > 0 {
-            // Bulk copy using memcpy
-            let srcPtr = sourceChannelData + Int(legacyFramePosition)
+            let srcPtr = sourceChannelData + Int(framePos)
             memcpy(output, srcPtr, Int(framesToCopy) * MemoryLayout<Float>.size)
-            legacyFramePosition += framesToCopy
         }
 
         // Fill remainder with silence
@@ -543,11 +565,20 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
             vDSP_vclr(output + Int(framesToCopy), 1, vDSP_Length(remaining))
         }
 
-        // Check if we've finished playback
-        if legacyFramePosition >= bufferLength {
+        // Phase 3: Update position and check completion in single lock
+        let newFramePos = framePos + framesToCopy
+        let isComplete = newFramePos >= bufferLength
+
+        withStateLock {
+            _legacyFramePosition = newFramePos
+            if isComplete {
+                _legacyBuffer = nil
+                _legacyFramePosition = 0
+            }
+        }
+
+        if isComplete {
             actionFlags.pointee = .offlineUnitRenderAction_Complete
-            legacyBuffer = nil
-            legacyFramePosition = 0
             print("KokoroSynthesisAudioUnit: Playback complete (legacy)")
         }
 
@@ -560,10 +591,12 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
     private func synthesizeSpeechRequestLegacy(_ speechRequest: AVSpeechSynthesisProviderRequest) {
         print("KokoroSynthesisAudioUnit: Using legacy synthesis mode")
 
-        // Reset buffer state
-        legacyBuffer = nil
-        legacyFramePosition = 0
-        legacySynthesisCompletedEmpty = false
+        // Reset buffer state atomically
+        withStateLock {
+            _legacyBuffer = nil
+            _legacyFramePosition = 0
+            _legacySynthesisCompletedEmpty = false
+        }
 
         // Extract data from request
         let ssml = speechRequest.ssmlRepresentation
@@ -620,16 +653,18 @@ public final class KokoroSynthesisAudioUnit: AVSpeechSynthesisProviderAudioUnit,
         // Handle empty result
         guard !allAudio.isEmpty else {
             print("KokoroSynthesisAudioUnit: No audio generated (legacy)")
-            legacySynthesisCompletedEmpty = true
+            withStateLock { _legacySynthesisCompletedEmpty = true }
             return
         }
 
         // Create audio buffer
         let buffer = createAudioBuffer(from: allAudio)
 
-        // Update buffer
-        legacyBuffer = buffer
-        legacyFramePosition = 0
+        // Update buffer atomically
+        withStateLock {
+            _legacyBuffer = buffer
+            _legacyFramePosition = 0
+        }
 
         print("KokoroSynthesisAudioUnit: Audio buffer ready (legacy), \(allAudio.count) samples")
     }
